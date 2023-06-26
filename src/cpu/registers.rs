@@ -1,9 +1,10 @@
-const ZERO_FLAG_BYTE_POSITION: u8 = 7;
-const SUBTRACT_FLAG_BYTE_POSITION: u8 = 6;
-const HALF_CARRY_FLAG_BYTE_POSITION: u8 = 5;
-const CARRY_FLAG_BYTE_POSITION: u8 = 4;
+macro_rules! addr {
+    ($hi:expr, $lo:expr) => {
+        (($hi as u16) << 8) | ($lo as u16)
+    };
+}
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct FlagsReg {
     pub zero: bool,
     pub subtract: bool,
@@ -12,6 +13,7 @@ pub struct FlagsReg {
 }
 
 impl FlagsReg {
+    /// Reset all the flags
     pub fn reset(&mut self) {
         self.zero = false;
         self.subtract = false;
@@ -19,30 +21,38 @@ impl FlagsReg {
         self.carry = false;
     }
 
-    /// Set all the flags at once
-    pub fn set_all(&mut self, zero: bool, subtract: bool, half_carry: bool, carry: bool) {
+    pub fn set_z(&mut self, zero: bool) {
         self.zero = zero;
+    }
+
+    pub fn set_s(&mut self, subtract: bool) {
         self.subtract = subtract;
+    }
+
+    pub fn set_h(&mut self, half_carry: bool) {
         self.half_carry = half_carry;
+    }
+
+    pub fn set_c(&mut self, carry: bool) {
         self.carry = carry;
     }
 }
 
 impl From<FlagsReg> for u8 {
     fn from(flag: FlagsReg) -> u8 {
-        (if flag.zero { 1 } else { 0 }) << ZERO_FLAG_BYTE_POSITION
-            | (if flag.subtract { 1 } else { 0 }) << SUBTRACT_FLAG_BYTE_POSITION
-            | (if flag.half_carry { 1 } else { 0 }) << HALF_CARRY_FLAG_BYTE_POSITION
-            | (if flag.carry { 1 } else { 0 }) << CARRY_FLAG_BYTE_POSITION
+        (flag.zero as u8) << 7
+            | (flag.subtract as u8) << 6
+            | (flag.half_carry as u8) << 5
+            | (flag.carry as u8) << 4
     }
 }
 
 impl From<u8> for FlagsReg {
     fn from(byte: u8) -> Self {
-        let zero = ((byte >> ZERO_FLAG_BYTE_POSITION) & 1) != 0;
-        let subtract = ((byte >> SUBTRACT_FLAG_BYTE_POSITION) & 1) != 0;
-        let half_carry = ((byte >> HALF_CARRY_FLAG_BYTE_POSITION) & 1) != 0;
-        let carry = ((byte >> CARRY_FLAG_BYTE_POSITION) & 1) != 0;
+        let zero = ((byte >> 7) & 1) != 0;
+        let subtract = ((byte >> 6) & 1) != 0;
+        let half_carry = ((byte >> 5) & 1) != 0;
+        let carry = ((byte >> 4) & 1) != 0;
 
         FlagsReg {
             zero,
@@ -95,8 +105,18 @@ impl Registers {
         self.f.reset();
     }
 
+    pub fn af(&self) -> u16 {
+        let f: u8 = self.f.into();
+        addr!(self.a, f)
+    }
+
+    pub fn set_af(&mut self, value: u16) {
+        self.a = ((value & 0xFF00) >> 8) as u8;
+        self.f = FlagsReg::from((value & 0xFF) as u8);
+    }
+
     pub fn bc(&self) -> u16 {
-        (self.b as u16) << 8 | self.c as u16
+        addr!(self.b, self.c)
     }
 
     pub fn set_bc(&mut self, value: u16) {
@@ -105,7 +125,7 @@ impl Registers {
     }
 
     pub fn de(&self) -> u16 {
-        (self.d as u16) << 8 | self.e as u16
+        addr!(self.d, self.e)
     }
 
     pub fn set_de(&mut self, value: u16) {
@@ -114,7 +134,7 @@ impl Registers {
     }
 
     pub fn hl(&self) -> u16 {
-        (self.h as u16) << 8 | self.l as u16
+        addr!(self.h, self.l)
     }
 
     pub fn set_hl(&mut self, value: u16) {
