@@ -1,103 +1,141 @@
-use crate::memory::VRAM_LEN;
+use crate::memory::{Memory, VRAM_LEN};
+
+use self::{lcdc::LCDC, stat::STAT};
+
+mod lcdc;
+mod stat;
 
 pub const SCREEN_WIDTH: usize = 160;
 pub const SCREEN_HEIGHT: usize = 144;
-pub const TILE_SET_LEN: usize = 384;
-
-#[derive(Debug, Copy, Clone)]
-pub enum TilePixelValue {
-    Zero,
-    One,
-    Two,
-    Three,
-}
-
-pub type Tile = [[TilePixelValue; 8]; 8];
-
-fn empty_tile() -> Tile {
-    [[TilePixelValue::Zero; 8]; 8]
-}
 
 #[derive(Debug, Clone, Copy)]
 pub struct GPU {
-    pub screen: [u8; SCREEN_WIDTH * SCREEN_HEIGHT],
+    // Digital image with RGB. Size = 144 * 160 * 3.
+    pub screen: [u8; SCREEN_WIDTH * SCREEN_HEIGHT * 3],
     pub vram: [u8; VRAM_LEN],
-    pub tile_set: [Tile; TILE_SET_LEN],
+    pub lcdc: LCDC,
+    pub stat: STAT,
+    pub vblank: bool,
+    pub hblank: bool,
+    // Specifies the position in the 256x256 pixels BG map (32x32 tiles) which is to be displayed at the upper/left LCD
+    // display position. Values in range from 0-255 may be used for X/Y each, the video controller automatically wraps
+    // back to the upper (left) position in BG map when drawing exceeds the lower (right) border of the BG map area.
+    pub sx: u8,
+    pub sy: u8,
+    // The LY indicates the vertical line to which the present data is transferred to the LCD Driver. The LY can
+    // take on any value between 0 through 153. The values between 144 and 153 indicate the V-Blank period. Writing
+    // will reset the counter.
+    pub ly: u8,
+    // The gameboy permanently compares the value of the LYC and LY registers. When both values are identical, the
+    // coincident bit in the STAT register becomes set, and (if enabled) a STAT interrupt is requested.
+    pub lyc: u8,
+
+    //  This register assigns gray shades to the color numbers of the BG and Window tiles.
+    //  Bit 7-6 - Shade for Color Number 3
+    //  Bit 5-4 - Shade for Color Number 2
+    //  Bit 3-2 - Shade for Color Number 1
+    //  Bit 1-0 - Shade for Color Number 0
+    pub bgp: u8,
+    // This register assigns gray shades for sprite palette 0. It works exactly as BGP ($FF47), except that the lower
+    // two bits aren't used because sprite data 00 is transparent.
+    pub op0: u8,
+    // This register assigns gray shades for sprite palette 1. It works exactly as BGP ($FF47), except that the lower
+    // two bits aren't used because sprite data 00 is transparent.
+    pub op1: u8,
+
+    // Window x and y
+    // Specifies the upper/left positions of the Window area
+    pub wx: u8,
+    pub wy: u8,
+    // Gameboy video controller can display up to 40 sprites either in 8x8 or in 8x16 pixels. Because of a limitation
+    // of hardware, only ten sprites can be displayed per scan line. Sprite patterns have the same format as BG tiles,
+    // but they are taken from the Sprite Pattern Table located at $8000-8FFF and have unsigned numbering.
+    pub oam: [u8; 0xA0],
+    dots: u32,
 }
 
 impl GPU {
     pub fn new() -> Self {
         Self {
             vram: [0; VRAM_LEN],
-            tile_set: [empty_tile(); TILE_SET_LEN],
-            screen: [0; SCREEN_WIDTH * SCREEN_HEIGHT],
+            screen: [0; SCREEN_WIDTH * SCREEN_HEIGHT * 3],
+            vblank: false,
+            hblank: false,
+            lcdc: lcdc::LCDC::new(),
+            stat: stat::STAT::new(),
+            sx: 0,
+            sy: 0,
+            ly: 0,
+            lyc: 0,
+            bgp: 0,
+            op0: 0,
+            op1: 1,
+            wx: 0,
+            wy: 0,
+            oam: [0; 0xA0],
+            dots: 0,
         }
     }
 
-    pub fn read_vram(&self, addr: usize) -> u8 {
-        self.vram[addr]
+    pub fn step(&mut self, cycles: u32) {
+        self.dots += cycles;
+        if self.dots >= 456 {
+            self.dots -= 456;
+            self.ly = self.ly.wrapping_add(1);
+            if self.ly == 144 {
+                self.vblank = true;
+                self.stat.vblank_interrupt = true;
+            } else if self.ly > 153 {
+                self.ly = 0;
+                self.vblank = false;
+                self.stat.vblank_interrupt = false;
+            }
+        }
     }
 
-    pub fn write_vram(&mut self, addr: usize, value: u8) {
-        self.vram[addr] = value;
-        // If our index is greater than 0x1800, we're not writing to the tile set storage
-        // so we can just return.
-        if addr >= 0x1800 {
-            return;
+    fn render_bg(&mut self) {
+        // TODO
+    }
+}
+
+impl Memory for GPU {
+    fn read_byte(&self, addr: u16) -> u8 {
+        let address = addr as usize;
+        match address {
+            0x8000..=0x9FFF => self.vram[address - 0x8000],
+            0xFE00..=0xFE9F => self.oam[address - 0xFE00],
+            0xFF40 => self.lcdc.into(),
+            0xFF41 => self.stat.into(),
+            0xFF42 => self.sy,
+            0xFF43 => self.sx,
+            0xFF44 => self.ly,
+            0xFF45 => self.lyc,
+            0xFF47 => self.bgp,
+            0xFF48 => self.op0,
+            0xFF49 => self.op1,
+            0xFF4A => self.wy,
+            0xFF4B => self.wx,
+            _ => panic!("Invalid vram address: {:X}", address),
         }
+    }
 
-        // Tiles rows are encoded in two bytes with the first byte always
-        // on an even address. Bitwise ANDing the address with 0xffe
-        // gives us the address of the first byte.
-        // For example: `12 & 0xFFFE == 12` and `13 & 0xFFFE == 12`
-        let normalized_addr = addr & 0xFFFE;
-
-        // First we need to get the two bytes that encode the tile row.
-        let byte1 = self.vram[normalized_addr];
-        let byte2 = self.vram[normalized_addr + 1];
-
-        // A tiles is 8 rows tall. Since each row is encoded with two bytes a tile
-        // is therefore 16 bytes in total.
-        let tile_index = addr / 16;
-        // Every two bytes is a new row
-        let row_index = (addr % 16) / 2;
-
-        // Now we're going to loop 8 times to get the 8 pixels that make up a given row.
-        for pixel_index in 0..8 {
-            // To determine a pixel's value we must first find the corresponding bit that encodes
-            // that pixels value:
-            // 1111_1111
-            // 0123 4567
-            //
-            // As you can see the bit that corresponds to the nth pixel is the bit in the nth
-            // position *from the left*. Bits are normally indexed from the right.
-            //
-            // To find the first pixel (a.k.a pixel 0) we find the left most bit (a.k.a bit 7). For
-            // the second pixel (a.k.a pixel 1) we first the second most left bit (a.k.a bit 6) and
-            // so on.
-            //
-            // We then create a mask with a 1 at that position and 0s everywhere else.
-            //
-            // Bitwise ANDing this mask with our bytes will leave that particular bit with its
-            // original value and every other bit with a 0.
-            let mask = 1 << (7 - pixel_index);
-            let lsb = byte1 & mask;
-            let msb = byte2 & mask;
-
-            // If the masked values are not 0 the masked bit must be 1. If they are 0, the masked
-            // bit must be 0.
-            //
-            // Finally we can tell which of the four tile values the pixel is. For example, if the least
-            // significant byte's bit is 1 and the most significant byte's bit is also 1, then we
-            // have tile value `Three`.
-            let value = match (lsb != 0, msb != 0) {
-                (true, true) => TilePixelValue::Three,
-                (false, true) => TilePixelValue::Two,
-                (true, false) => TilePixelValue::One,
-                (false, false) => TilePixelValue::Zero,
-            };
-
-            self.tile_set[tile_index][row_index][pixel_index] = value;
+    fn write_byte(&mut self, addr: u16, value: u8) {
+        let address = addr as usize;
+        match address {
+            0x8000..=0x9FFF => self.vram[address - 0x8000] = value,
+            0xFE00..=0xFE9F => self.oam[address - 0xFE00] = value,
+            0xFF40 => self.lcdc = value.into(),
+            0xFF41 => self.stat = value.into(),
+            0xFF42 => self.sy = value,
+            0xFF43 => self.sx = value,
+            0xFF44 => self.ly = value,
+            0xFF45 => self.lyc = value,
+            0xFF47 => self.bgp = value,
+            0xFF48 => self.op0 = value,
+            0xFF49 => self.op1 = value,
+            0xFF4A => self.wy = value,
+            0xFF4B => self.wx = value,
+            _ => panic!("Invalid vram address: {:X}", address),
         }
     }
 }

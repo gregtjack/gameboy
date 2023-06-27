@@ -1,4 +1,4 @@
-use crate::memory::MemBus;
+use crate::memory::{mmu::MemBus, Memory};
 
 use self::registers::Registers;
 
@@ -7,19 +7,6 @@ mod registers;
 pub const CLOCK_FREQUENCY: u32 = 4_194_304;
 pub const STEP_TIME: u32 = 16;
 pub const STEP_CYCLES: u32 = (STEP_TIME as f64 / (1000_f64 / CLOCK_FREQUENCY as f64)) as u32;
-
-macro_rules! add {
-    ($cpu:expr, $reg:ident, $value:expr) => {
-        let (new_value, overflow) = $cpu.reg.$reg.overflowing_add($value);
-        $cpu.reg.f.set_z(new_value == 0x0);
-        $cpu.reg.f.set_s(false);
-        $cpu.reg
-            .f
-            .set_h(($cpu.reg.$reg & 0xf) + ($value & 0xf) > 0xf);
-        $cpu.reg.f.set_c(overflow);
-        $cpu.reg.$reg = new_value;
-    };
-}
 
 macro_rules! adc {
     ($cpu:expr, $reg:ident, $value:expr) => {
@@ -208,6 +195,15 @@ impl CPU {
         self.reg.reset();
         self.sp = 0;
         self.pc = 0;
+    }
+
+    fn add(&mut self, value: u8) {
+        let (new_value, overflow) = self.reg.a.overflowing_add(value);
+        self.reg.f.set_z(new_value == 0x0);
+        self.reg.f.set_s(false);
+        self.reg.f.set_h((self.reg.a & 0xf) + (value & 0xf) > 0xf);
+        self.reg.f.set_c(overflow);
+        self.reg.a = new_value;
     }
 
     fn push(&mut self, value: u16) {
@@ -767,47 +763,47 @@ impl CPU {
             /* 8-bit arithmetic/logical */
             0x80 => {
                 // ADD A, B
-                add!(self, a, self.reg.b);
+                self.add(self.reg.b);
                 Ok((self.pc.wrapping_add(1), 4))
             }
             0x81 => {
                 // ADD A, C
-                add!(self, a, self.reg.c);
+                self.add(self.reg.c);
                 Ok((self.pc.wrapping_add(1), 4))
             }
             0x82 => {
                 // ADD A, D
-                add!(self, a, self.reg.d);
+                self.add(self.reg.d);
                 Ok((self.pc.wrapping_add(1), 4))
             }
             0x83 => {
                 // ADD A, E
-                add!(self, a, self.reg.e);
+                self.add(self.reg.e);
                 Ok((self.pc.wrapping_add(1), 4))
             }
             0x84 => {
                 // ADD A, H
-                add!(self, a, self.reg.h);
+                self.add(self.reg.h);
                 Ok((self.pc.wrapping_add(1), 4))
             }
             0x85 => {
                 // ADD A, L
-                add!(self, a, self.reg.l);
+                self.add(self.reg.l);
                 Ok((self.pc.wrapping_add(1), 4))
             }
             0x86 => {
                 // ADD A, (HL)
-                add!(self, a, self.bus.read_byte(self.reg.hl()));
+                self.add(self.bus.read_byte(self.reg.hl()));
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x87 => {
                 // ADD A, A
-                add!(self, a, self.reg.a);
+                self.add(self.reg.a);
                 Ok((self.pc.wrapping_add(1), 4))
             }
             0xC6 => {
                 // ADD A, n
-                add!(self, a, self.bus.read_byte(self.pc.wrapping_add(1)));
+                self.add(self.bus.read_byte(self.pc.wrapping_add(1)));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0x88 => {
@@ -1328,7 +1324,12 @@ impl CPU {
             }
             0x17 => {
                 // RLA
-
+                let bit7 = self.reg.a & 0x80 != 0;
+                self.reg.a = (self.reg.a << 1) | (self.reg.f.carry as u8);
+                self.reg.f.set_z(false);
+                self.reg.f.set_s(false);
+                self.reg.f.set_h(false);
+                self.reg.f.set_c(bit7);
                 Ok((self.pc.wrapping_add(1), 4))
             }
             0x0F => {

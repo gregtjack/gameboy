@@ -1,8 +1,4 @@
-macro_rules! addr {
-    ($hi:expr, $lo:expr) => {
-        (($hi as u16) << 8) | ($lo as u16)
-    };
-}
+use crate::addr;
 
 #[derive(Debug, Clone, Copy)]
 pub struct FlagsReg {

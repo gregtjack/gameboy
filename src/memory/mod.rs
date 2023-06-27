@@ -1,9 +1,10 @@
-use crate::gpu::GPU;
+pub mod mmu;
 
-// helpful constants for memory blocks
-pub const BOOT_ROM_BEGIN: usize = 0x00;
-pub const BOOT_ROM_END: usize = 0xFF;
-pub const BOOT_ROM_LEN: usize = BOOT_ROM_END - BOOT_ROM_BEGIN + 1;
+// Helpful constants for GB memory blocks
+
+pub const BIOS_BEGIN: usize = 0x0000;
+pub const BIOS_END: usize = 0x00FF;
+pub const BIOS_LEN: usize = BIOS_END - BIOS_BEGIN + 1;
 
 pub const ROM_BANK_0_BEGIN: usize = 0x0000;
 pub const ROM_BANK_0_END: usize = 0x3FFF;
@@ -42,45 +43,17 @@ pub const ZERO_PAGE_BEGIN: usize = 0xFF80;
 pub const ZERO_PAGE_END: usize = 0xFFFE;
 pub const ZERO_PAGE_LEN: usize = ZERO_PAGE_END - ZERO_PAGE_BEGIN + 1;
 
-#[derive(Clone, Copy, Debug)]
-pub struct MemBus {
-    pub gpu: GPU,
-    pub mem: [u8; 0xFFFF],
-}
+pub trait Memory {
+    fn read_byte(&self, addr: u16) -> u8;
 
-impl MemBus {
-    pub fn new() -> Self {
-        Self {
-            mem: [0; 0xFFFF],
-            gpu: GPU::new(),
-        }
+    fn write_byte(&mut self, addr: u16, value: u8);
+
+    fn read_word(&self, addr: u16) -> u16 {
+        self.read_byte(addr) as u16 | (self.read_byte(addr + 1) as u16) << 8
     }
 
-    pub fn read_byte(&self, addr: u16) -> u8 {
-        let address = addr as usize;
-        match address {
-            VRAM_BEGIN..=VRAM_END => self.gpu.read_vram(address - VRAM_BEGIN),
-            _ => self.mem[address],
-        }
-    }
-
-    pub fn write_byte(&mut self, addr: u16, value: u8) {
-        let address = addr as usize;
-        match address {
-            VRAM_BEGIN..=VRAM_END => self.gpu.write_vram(address - VRAM_BEGIN, value),
-            _ => self.mem[address] = value,
-        }
-    }
-
-    pub fn read_word(&self, addr: u16) -> u16 {
-        self.mem[addr as usize] as u16 | (self.mem[addr as usize + 1] as u16) << 8
-    }
-
-    pub fn write_word(&mut self, addr: u16, value: u16) {
-        // TODO: actually not sure if this is correct endianess
-        let hi = (value & 0xFF00) as u8;
-        let lo = (value & 0x00FF) as u8;
-        self.mem[addr as usize] = lo;
-        self.mem[(addr + 1) as usize] = hi;
+    fn write_word(&mut self, addr: u16, value: u16) {
+        self.write_byte(addr, (value & 0xFF00) as u8);
+        self.write_byte(addr + 1, (value & 0x00FF) as u8);
     }
 }

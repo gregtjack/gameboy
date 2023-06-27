@@ -14,9 +14,11 @@ use winit::{
 
 use crate::cpu::CPU;
 
+mod apu;
 mod cpu;
 mod gpu;
 mod memory;
+mod util;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -60,13 +62,7 @@ fn main() -> Result<()> {
         },
         Event::RedrawRequested(_) => {
             let cycles = cpu.step();
-            for (i, pixel) in cpu.bus.gpu.screen.chunks(4).enumerate() {
-                let offset = i * 4;
-                pixels.frame_mut()[offset] = pixel[0];
-                pixels.frame_mut()[offset + 1] = pixel[1];
-                pixels.frame_mut()[offset + 2] = pixel[2];
-                pixels.frame_mut()[offset + 3] = pixel[3];
-            }
+            for (i, pixel) in cpu.bus.gpu.screen.chunks(4).enumerate() {}
             thread::sleep(Duration::from_nanos(2))
         }
         Event::MainEventsCleared => {
