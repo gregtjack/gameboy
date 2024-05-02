@@ -1,14 +1,17 @@
-use crate::addr;
 
 #[derive(Debug, Clone, Copy)]
-pub struct FlagsReg {
+pub struct Flags {
     pub zero: bool,
     pub subtract: bool,
     pub half_carry: bool,
     pub carry: bool,
 }
 
-impl FlagsReg {
+impl Flags {
+    pub fn zero() -> Self {
+        Flags { zero: false, subtract: false, half_carry: false, carry: false }
+    }
+
     /// Reset all the flags
     pub fn reset(&mut self) {
         self.zero = false;
@@ -17,25 +20,29 @@ impl FlagsReg {
         self.carry = false;
     }
 
+    /// Set zero
     pub fn set_z(&mut self, zero: bool) {
         self.zero = zero;
     }
 
-    pub fn set_s(&mut self, subtract: bool) {
+    /// Set subtract
+    pub fn set_n(&mut self, subtract: bool) {
         self.subtract = subtract;
     }
 
+    /// Set half-carry
     pub fn set_h(&mut self, half_carry: bool) {
         self.half_carry = half_carry;
     }
 
+    /// Set carry
     pub fn set_c(&mut self, carry: bool) {
         self.carry = carry;
     }
 }
 
-impl From<FlagsReg> for u8 {
-    fn from(flag: FlagsReg) -> u8 {
+impl From<Flags> for u8 {
+    fn from(flag: Flags) -> u8 {
         (flag.zero as u8) << 7
             | (flag.subtract as u8) << 6
             | (flag.half_carry as u8) << 5
@@ -43,14 +50,14 @@ impl From<FlagsReg> for u8 {
     }
 }
 
-impl From<u8> for FlagsReg {
+impl From<u8> for Flags {
     fn from(byte: u8) -> Self {
         let zero = ((byte >> 7) & 1) != 0;
         let subtract = ((byte >> 6) & 1) != 0;
         let half_carry = ((byte >> 5) & 1) != 0;
         let carry = ((byte >> 4) & 1) != 0;
 
-        FlagsReg {
+        Flags {
             zero,
             subtract,
             half_carry,
@@ -59,21 +66,36 @@ impl From<u8> for FlagsReg {
     }
 }
 
+/// CPU registers. Most are 8-bit but can be combined to form a 16-bit wide value.
 #[derive(Debug)]
 pub struct Registers {
+    /// Program counter
+    pub pc: u16,
+    /// Stack pointer
+    pub sp: u16,
+    /// Register `A`
     pub a: u8,
+    /// Register `B`
     pub b: u8,
+    /// Register `C`
     pub c: u8,
+    /// Register `D`
     pub d: u8,
+    /// Register `E`
     pub e: u8,
+    /// Register `H`
     pub h: u8,
+    /// Register `L`
     pub l: u8,
-    pub f: FlagsReg,
+    /// Flags register.
+    pub f: Flags,
 }
 
 impl Registers {
     pub fn new() -> Self {
         Self {
+            pc: 0,
+            sp: 0,
             a: 0,
             b: 0,
             c: 0,
@@ -81,12 +103,7 @@ impl Registers {
             e: 0,
             h: 0,
             l: 0,
-            f: FlagsReg {
-                zero: false,
-                subtract: false,
-                half_carry: false,
-                carry: false,
-            },
+            f: Flags::zero()
         }
     }
 
@@ -103,16 +120,16 @@ impl Registers {
 
     pub fn af(&self) -> u16 {
         let f: u8 = self.f.into();
-        addr!(self.a, f)
+        ((self.a as u16) << 8) | (f as u16)
     }
 
     pub fn set_af(&mut self, value: u16) {
         self.a = ((value & 0xFF00) >> 8) as u8;
-        self.f = FlagsReg::from((value & 0xFF) as u8);
+        self.f = Flags::from((value & 0xFF) as u8);
     }
 
     pub fn bc(&self) -> u16 {
-        addr!(self.b, self.c)
+        ((self.b as u16) << 8) | (self.c as u16)
     }
 
     pub fn set_bc(&mut self, value: u16) {
@@ -121,7 +138,7 @@ impl Registers {
     }
 
     pub fn de(&self) -> u16 {
-        addr!(self.d, self.e)
+        ((self.d as u16) << 8) | (self.e as u16)
     }
 
     pub fn set_de(&mut self, value: u16) {

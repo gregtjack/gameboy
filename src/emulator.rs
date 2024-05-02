@@ -50,7 +50,7 @@ impl Gameboy {
     }
 
     pub fn load_rom(&mut self, bin: Vec<u8>) {
-        self.cpu.bus.mem.copy_from_slice(&bin)
+        self.cpu.bus.mem[..bin.len()].copy_from_slice(&bin)
     }
 
     pub fn update(&mut self) {

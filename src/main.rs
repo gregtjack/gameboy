@@ -23,7 +23,6 @@ mod gpu;
 mod joypad;
 mod memory;
 mod timer;
-mod util;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -72,8 +71,7 @@ fn main() -> Result<()> {
                     let r = screen[i];
                     let g = screen[i + 1];
                     let b = screen[i + 2];
-                    let a = screen[i + 3];
-                    pixel.copy_from_slice(&[r, g, b, a]);
+                    pixel.copy_from_slice(&[r, g, b, 1]);
                 }
 
                 if let Err(err) = pixels.render() {

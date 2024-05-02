@@ -21,11 +21,11 @@ pub trait Memory {
     fn write8(&mut self, addr: u16, value: u8);
 
     fn read16(&self, addr: u16) -> u16 {
-        self.read8(addr) as u16 | (self.read8(addr + 1) as u16) << 8
+        (self.read8(addr) as u16) | (self.read8(addr + 1) as u16) << 8
     }
 
     fn write16(&mut self, addr: u16, value: u16) {
-        self.write8(addr, (value & 0xFF00) as u8);
-        self.write8(addr + 1, (value & 0x00FF) as u8);
+        self.write8(addr, (value & 0xFF) as u8);
+        self.write8(addr + 1, (value >> 8) as u8);
     }
 }
