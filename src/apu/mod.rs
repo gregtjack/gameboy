@@ -1,3 +1,3 @@
-pub struct APU {
+pub struct Apu {
     // TODO: Implement me
 }

@@ -1,6 +1,14 @@
-use crate::memory::{Memory, VRAM_LEN};
+use std::{cell::RefCell, rc::Rc};
 
-use self::{lcdc::LCDC, stat::STAT};
+use crate::memory::{
+    interrupts::{Interrupt, InterruptVector, Interrupts},
+    Memory, OAM_BEGIN, OAM_END, UNDEFINED, VRAM_BEGIN, VRAM_END, VRAM_LEN,
+};
+
+use self::{
+    lcdc::Lcdc,
+    stat::{Mode, Stat},
+};
 
 mod lcdc;
 mod stat;
@@ -8,28 +16,87 @@ mod stat;
 pub const SCREEN_WIDTH: usize = 160;
 pub const SCREEN_HEIGHT: usize = 144;
 
-#[derive(Debug, Clone, Copy)]
-pub struct GPU {
+const TILESET_FIRST_BEGIN_ADDRESS: u16 = 0x8000;
+const TILESET_SECOND_BEGIN_ADDRESS: u16 = 0x9000;
+const BGMAP_FIRST_BEGIN_ADDRESS: u16 = 0x9800;
+const BGMAP_SECOND_BEGIN_ADDRESS: u16 = 0x9C00;
+
+const CYCLES_OAM: u32 = 80;
+const CYCLES_VRAM: u32 = 172;
+const CYCLES_HBLANK: u32 = 204;
+const CYCLES_VBLANK: u32 = 456;
+
+const SCANLINES_DISPLAY: u8 = 143;
+const MAX_SCANLINES: u8 = 153;
+
+const PALETTE: [[Color; 4]; 4] = [
+    [Color::White, Color::White, Color::White, Color::White],
+    [
+        Color::LightGray,
+        Color::LightGray,
+        Color::LightGray,
+        Color::White,
+    ],
+    [
+        Color::DarkGray,
+        Color::DarkGray,
+        Color::DarkGray,
+        Color::White,
+    ],
+    [Color::Black, Color::Black, Color::Black, Color::White],
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Color {
+    White,
+    LightGray,
+    DarkGray,
+    Black,
+}
+
+impl From<u8> for Color {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Color::White,
+            1 => Color::LightGray,
+            2 => Color::DarkGray,
+            _ => Color::Black,
+        }
+    }
+}
+
+impl From<Color> for u8 {
+    fn from(color: Color) -> Self {
+        match color {
+            Color::White => 255,
+            Color::LightGray => 192,
+            Color::DarkGray => 96,
+            Color::Black => 0,
+        }
+    }
+}
+
+pub type Screen = [u8; SCREEN_WIDTH * SCREEN_HEIGHT * 3];
+
+#[derive(Debug)]
+pub struct Gpu {
     // Digital image with RGB. Size = 144 * 160 * 3.
-    pub screen: [u8; SCREEN_WIDTH * SCREEN_HEIGHT * 3],
-    pub vram: [u8; VRAM_LEN],
-    pub lcdc: LCDC,
-    pub stat: STAT,
-    pub vblank: bool,
-    pub hblank: bool,
+    pub screen: Screen,
+    pub vram: [u8; 0x2000],
+    pub lcdc: Lcdc,
+    pub stat: Stat,
+    pub v_blank: bool,
+    pub h_blank: bool,
+    pub int: InterruptVector,
     // Specifies the position in the 256x256 pixels BG map (32x32 tiles) which is to be displayed at the upper/left LCD
-    // display position. Values in range from 0-255 may be used for X/Y each, the video controller automatically wraps
-    // back to the upper (left) position in BG map when drawing exceeds the lower (right) border of the BG map area.
+    // display position.
     pub sx: u8,
     pub sy: u8,
-    // The LY indicates the vertical line to which the present data is transferred to the LCD Driver. The LY can
-    // take on any value between 0 through 153. The values between 144 and 153 indicate the V-Blank period. Writing
-    // will reset the counter.
+    // The LY indicates the vertical line to which the present data is transferred to the LCD Driver
     pub ly: u8,
     // The gameboy permanently compares the value of the LYC and LY registers. When both values are identical, the
     // coincident bit in the STAT register becomes set, and (if enabled) a STAT interrupt is requested.
     pub lyc: u8,
-
     //  This register assigns gray shades to the color numbers of the BG and Window tiles.
     //  Bit 7-6 - Shade for Color Number 3
     //  Bit 5-4 - Shade for Color Number 2
@@ -42,7 +109,6 @@ pub struct GPU {
     // This register assigns gray shades for sprite palette 1. It works exactly as BGP ($FF47), except that the lower
     // two bits aren't used because sprite data 00 is transparent.
     pub op1: u8,
-
     // Window x and y
     // Specifies the upper/left positions of the Window area
     pub wx: u8,
@@ -51,18 +117,19 @@ pub struct GPU {
     // of hardware, only ten sprites can be displayed per scan line. Sprite patterns have the same format as BG tiles,
     // but they are taken from the Sprite Pattern Table located at $8000-8FFF and have unsigned numbering.
     pub oam: [u8; 0xA0],
-    dots: u32,
+    clock: u32,
 }
 
-impl GPU {
+impl Gpu {
     pub fn new() -> Self {
         Self {
             vram: [0; VRAM_LEN],
             screen: [0; SCREEN_WIDTH * SCREEN_HEIGHT * 3],
-            vblank: false,
-            hblank: false,
-            lcdc: lcdc::LCDC::new(),
-            stat: stat::STAT::new(),
+            int: InterruptVector::new(),
+            v_blank: false,
+            h_blank: false,
+            lcdc: lcdc::Lcdc::new(),
+            stat: stat::Stat::new(),
             sx: 0,
             sy: 0,
             ly: 0,
@@ -73,69 +140,231 @@ impl GPU {
             wx: 0,
             wy: 0,
             oam: [0; 0xA0],
-            dots: 0,
+            clock: 0,
         }
     }
 
     pub fn step(&mut self, cycles: u32) {
-        self.dots += cycles;
-        if self.dots >= 456 {
-            self.dots -= 456;
-            self.ly = self.ly.wrapping_add(1);
-            if self.ly == 144 {
-                self.vblank = true;
-                self.stat.vblank_interrupt = true;
-            } else if self.ly > 153 {
-                self.ly = 0;
-                self.vblank = false;
-                self.stat.vblank_interrupt = false;
+        if !self.lcdc.lcd_enable {
+            return;
+        }
+
+        self.clock += cycles;
+
+        match self.stat.mode {
+            Mode::OAM => {
+                if self.clock >= CYCLES_OAM {
+                    self.set_mode(Mode::VRAM);
+                    self.clock %= CYCLES_OAM;
+                }
+            }
+            Mode::VRAM => {
+                if self.clock >= CYCLES_VRAM {
+                    self.render_scanline();
+                    self.set_mode(Mode::HBlank);
+                    self.clock %= CYCLES_VRAM;
+                }
+            }
+            Mode::HBlank => {
+                if self.clock >= CYCLES_HBLANK {
+                    self.clock %= CYCLES_HBLANK;
+
+                    if self.ly >= SCANLINES_DISPLAY {
+                        self.set_mode(Mode::VBlank);
+                        // render screen
+                        self.int.vblank = true;
+                    } else {
+                        self.set_scanline(self.ly + 1);
+                        self.set_mode(Mode::OAM);
+                    }
+                }
+            }
+            Mode::VBlank => {
+                if self.clock >= CYCLES_VBLANK {
+                    self.set_scanline(self.ly + 1);
+                    self.clock %= CYCLES_VBLANK;
+                    if self.ly >= MAX_SCANLINES {
+                        self.set_mode(Mode::OAM);
+                        self.set_scanline(0);
+                    }
+                }
             }
         }
     }
 
-    fn render_bg(&mut self) {
-        // TODO
+    fn compare_lyc(&mut self) {
+        self.stat.coincidence_flag = false;
+        if self.lyc == self.ly {
+            self.stat.coincidence_flag = true;
+            if self.stat.coincidence_interrupt {
+                self.int.lcd_stat = true;
+            }
+        }
+    }
+
+    fn set_scanline(&mut self, value: u8) {
+        self.ly = value;
+        self.compare_lyc();
+    }
+
+    fn set_mode(&mut self, mode: Mode) {
+        self.stat.mode = mode;
+        match self.stat.mode {
+            Mode::OAM => {
+                if self.stat.oam_interrupt {
+                    self.int.lcd_stat = true;
+                }
+            }
+            Mode::HBlank => {
+                if self.stat.hblank_interrupt {
+                    self.int.lcd_stat = true;
+                }
+            }
+            Mode::VBlank => {
+                if self.stat.vblank_interrupt {
+                    self.int.lcd_stat = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render_scanline(&mut self) {
+        if self.lcdc.bg_display {
+            self.render_bg_line();
+        }
+
+        if self.lcdc.obj_display_enable {
+            self.render_obj_line();
+        }
+    }
+
+    fn render_bg_line(&mut self) {
+        let y_bg = self.ly.wrapping_add(self.sy);
+        let line_is_window = self.lcdc.window_display_enable && self.ly >= self.wy;
+
+        for x in 0..SCREEN_WIDTH as u8 {
+            let x_bg = x.wrapping_add(self.sx);
+            let column_is_window = self.lcdc.window_display_enable && x >= self.wx.wrapping_sub(7);
+            let is_window = line_is_window && column_is_window;
+
+            let tile_address = if is_window {
+                self.get_window_address(self.ly, x)
+            } else {
+                self.get_bgmap_address(y_bg, x_bg)
+            };
+
+            let tile = self.read8(tile_address);
+
+            let tile_begin = if self.lcdc.bg_window_tile_data_select {
+                // Use first tileset, tile_number interpreted as unsigned
+                TILESET_FIRST_BEGIN_ADDRESS + tile as u16 * 16
+            } else {
+                // Use second tileset, tile_number interpreted as signed
+                TILESET_SECOND_BEGIN_ADDRESS.wrapping_add(((tile as i8) as u16).wrapping_mul(16))
+            };
+
+            let y_tile_addr_offset = if is_window {
+                (self.ly - self.wy) % 8 * 2
+            } else {
+                y_bg % 8 * 2
+            } as u16;
+
+            let tile_data_address = tile_begin + y_tile_addr_offset;
+
+            let tile_data = self.read8(tile_data_address);
+            // The color data is placed one byte after the pixel data
+            let tile_color = self.read8(tile_data_address + 1);
+
+            let pixel_index = if is_window {
+                self.wx.wrapping_sub(x) % 8
+            } else {
+                7 - (x_bg % 8)
+            };
+
+            // Draw bg pixel to screen
+            let color_index = Self::get_color_index(tile_data, tile_color, pixel_index);
+        }
+    }
+
+    fn render_obj_line(&mut self) {}
+
+    fn get_window_address(&self, y: u8, x: u8) -> u16 {
+        let addr = if self.lcdc.window_tile_map_display_select {
+            BGMAP_SECOND_BEGIN_ADDRESS
+        } else {
+            BGMAP_FIRST_BEGIN_ADDRESS
+        };
+
+        let y_offset = y.wrapping_sub(self.wy);
+        let x_offset = x.wrapping_sub(self.wx.wrapping_sub(7));
+
+        addr + (y_offset as u16 / 8 * 32) + (x_offset as u16 / 8)
+    }
+
+    fn get_bgmap_address(&self, y: u8, x: u8) -> u16 {
+        let addr = if self.lcdc.bg_tile_map_display_select {
+            BGMAP_SECOND_BEGIN_ADDRESS
+        } else {
+            BGMAP_FIRST_BEGIN_ADDRESS
+        };
+
+        addr + (y as u16 / 8 * 32) + (x as u16 / 8)
+    }
+
+    fn get_color_index(tile_data: u8, tile_color: u8, pixel_index: u8) -> u8 {
+        (if tile_data & (1 << pixel_index) > 0 {
+            1
+        } else {
+            0
+        }) | (if tile_color & (1 << pixel_index) > 0 {
+            1
+        } else {
+            0
+        }) << 1
     }
 }
 
-impl Memory for GPU {
-    fn read_byte(&self, addr: u16) -> u8 {
+impl Memory for Gpu {
+    fn read8(&self, addr: u16) -> u8 {
         let address = addr as usize;
         match address {
-            0x8000..=0x9FFF => self.vram[address - 0x8000],
-            0xFE00..=0xFE9F => self.oam[address - 0xFE00],
+            VRAM_BEGIN..=VRAM_END => self.vram[address - VRAM_BEGIN],
+            OAM_BEGIN..=OAM_END => self.oam[address - OAM_BEGIN],
             0xFF40 => self.lcdc.into(),
             0xFF41 => self.stat.into(),
             0xFF42 => self.sy,
             0xFF43 => self.sx,
             0xFF44 => self.ly,
             0xFF45 => self.lyc,
+            0xFF46 => UNDEFINED,
             0xFF47 => self.bgp,
             0xFF48 => self.op0,
             0xFF49 => self.op1,
             0xFF4A => self.wy,
             0xFF4B => self.wx,
-            _ => panic!("Invalid vram address: {:X}", address),
+            _ => panic!("[GPU] Invalid address: {:X}", address),
         }
     }
 
-    fn write_byte(&mut self, addr: u16, value: u8) {
+    fn write8(&mut self, addr: u16, value: u8) {
         let address = addr as usize;
         match address {
-            0x8000..=0x9FFF => self.vram[address - 0x8000] = value,
-            0xFE00..=0xFE9F => self.oam[address - 0xFE00] = value,
+            VRAM_BEGIN..=VRAM_END => self.vram[address - VRAM_BEGIN] = value,
+            OAM_BEGIN..=OAM_END => self.oam[address - OAM_BEGIN] = value,
             0xFF40 => self.lcdc = value.into(),
             0xFF41 => self.stat = value.into(),
             0xFF42 => self.sy = value,
             0xFF43 => self.sx = value,
-            0xFF44 => self.ly = value,
+            // Writing to this register resets the scanline
+            0xFF44 => self.ly = 0,
             0xFF45 => self.lyc = value,
             0xFF47 => self.bgp = value,
             0xFF48 => self.op0 = value,
             0xFF49 => self.op1 = value,
             0xFF4A => self.wy = value,
-            0xFF4B => self.wx = value,
-            _ => panic!("Invalid vram address: {:X}", address),
+            0xFF4B if value >= 7 => self.wx = value,
+            _ => panic!("[GPU] Invalid address: {:X}", address),
         }
     }
 }

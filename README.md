@@ -1,3 +1,3 @@
 # Gameboy Emulator
 
-WIP :)
+WIP

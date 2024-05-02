@@ -1,12 +1,20 @@
-use crate::memory::{mmu::MemBus, Memory};
+use std::{cell::RefCell, rc::Rc};
+
+use color_eyre::Result;
+use tracing::{debug, info};
+
+use crate::{
+    clock::Clock,
+    memory::{
+        interrupts::{InterruptVector, Interrupts},
+        mmu::Mmu,
+        Memory, INTERRUPT_ENABLE_ADDRESS, INTERRUPT_FLAGS_ADDRESS,
+    },
+};
 
 use self::registers::Registers;
 
 mod registers;
-
-pub const CLOCK_FREQUENCY: u32 = 4_194_304;
-pub const STEP_TIME: u32 = 16;
-pub const STEP_CYCLES: u32 = (STEP_TIME as f64 / (1000_f64 / CLOCK_FREQUENCY as f64)) as u32;
 
 macro_rules! adc {
     ($cpu:expr, $reg:ident, $value:expr) => {
@@ -112,86 +120,81 @@ macro_rules! dec {
 
 pub type Opcode = u8;
 
-#[derive(Debug)]
-pub enum CpuError {
-    InvalidOpcode,
-}
-
-/// The clock runs at 4.194304 MHz. This means that each clock cycle
-/// takes 1/4.194304 MHz = 0.238 μs = 238 ns. The CPU clock is also
-/// referred to as the “T-cycle”. This can be divided by 4 to get the
-/// machine cycle (M-cycle) which is 1.048576 MHz.
-#[derive(Debug)]
-pub struct Clock {
-    t: u32,
-    // unused for now
-    _m: u32,
-}
-
-impl Clock {
-    pub fn new() -> Self {
-        Self { t: 0, _m: 0 }
-    }
-
-    pub fn reset(&mut self) {
-        self.t = 0;
-        self._m = 0;
-    }
-
-    pub fn tick(&mut self, t_cycles: u32) {
-        self.t += t_cycles;
-        self._m += t_cycles / 4;
-    }
-}
-
 /// Implementation of the Sharp LR35902
 #[derive(Debug)]
-pub struct CPU {
+pub struct Cpu {
     reg: Registers,
     pc: u16,
     sp: u16,
-    pub bus: MemBus,
-    clock: Clock,
-    stopped: bool,
-    // The ime is set to true when an interrupt is requested and
-    // set to false when the interrupt is accepted. This is used
-    // to prevent the same interrupt from being processed multiple
-    // times.
+    pub bus: Mmu,
+    pub halted: bool,
     ime: bool,
 }
 
-impl CPU {
+impl Cpu {
     pub fn new() -> Self {
         Self {
             reg: Registers::new(),
             pc: 0,
             sp: 0,
-            bus: MemBus::new(),
-            clock: Clock { _m: 0, t: 0 },
-            stopped: false,
+            bus: Mmu::new(),
+            halted: false,
             ime: false,
         }
     }
 
-    pub fn load_bios(&mut self, bios: Vec<u8>) {
-        assert_eq!(bios.len(), 256);
-        self.bus.mem[..bios.len()].copy_from_slice(&bios);
-    }
-
     pub fn step(&mut self) -> u32 {
         // read next instruction
-        let opcode = self.bus.read_byte(self.pc);
+        let opcode = self.bus.read8(self.pc);
+
+        if self.handle_interrupts() {
+            return 12;
+        }
+
         // execute instruction
         let (new_pc, cycles) = self
             .execute(opcode)
             .expect(format!("Invalid instruction: 0x{:X}", opcode).as_str());
         // update program counter and clock
         self.pc = new_pc;
-        self.clock.tick(cycles);
+
+        if self.bus.mem[0xff02] == 0x81 {
+            let c: char = self.bus.mem[0xff01].into();
+            print!("{}", c);
+            self.bus.mem[0xff02] = 0x0;
+        }
+
         cycles
     }
 
-    fn reset(&mut self) {
+    pub fn handle_interrupts(&mut self) -> bool {
+        if self.ime {
+            let interrupt_flags = self.bus.read8(INTERRUPT_FLAGS_ADDRESS as u16);
+            let interrupt_enable = self.bus.read8(INTERRUPT_ENABLE_ADDRESS as u16);
+            let interrupt: InterruptVector = (interrupt_flags & interrupt_enable).into();
+
+            if !interrupt.is_zero() {
+                self.ime = false;
+                self.bus.write8(
+                    INTERRUPT_FLAGS_ADDRESS as u16,
+                    interrupt_flags & !(u8::from(interrupt)),
+                );
+                self.push(self.pc);
+                // match interrupt {
+                //     0x01 => self.pc = 0x40,
+                //     0x02 => self.pc = 0x48,
+                //     0x04 => self.pc = 0x50,
+                //     0x08 => self.pc = 0x58,
+                //     0x10 => self.pc = 0x60,
+                //     _ => panic!("Invalid interrupt"),
+                // }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn reset(&mut self) {
         self.reg.reset();
         self.sp = 0;
         self.pc = 0;
@@ -207,15 +210,14 @@ impl CPU {
     }
 
     fn push(&mut self, value: u16) {
-        self.bus
-            .write_byte(self.sp - 1, ((value & 0xFF00) >> 8) as u8);
-        self.bus.write_byte(self.sp - 2, (value & 0xFF) as u8);
-        self.sp -= 2;
+        self.bus.write8(self.sp - 1, ((value & 0xFF00) >> 8) as u8);
+        self.bus.write8(self.sp - 2, (value & 0xFF) as u8);
+        self.sp = self.sp.wrapping_sub(2);
     }
 
     fn pop(&mut self) -> u16 {
-        let value = self.bus.read_word(self.sp);
-        self.sp += 2;
+        let value = self.bus.read16(self.sp);
+        self.sp = self.sp.wrapping_add(2);
         value
     }
 
@@ -312,7 +314,8 @@ impl CPU {
         value | (1 << bit)
     }
 
-    fn execute(&mut self, instruction: Opcode) -> Result<(u16, u32), CpuError> {
+    fn execute(&mut self, instruction: Opcode) -> Result<(u16, u32)> {
+        println!("[Core] pc=0x{:X} instr=0x{:X}", self.pc, instruction);
         match instruction {
             /* CPU control */
             0x00 => Ok((self.pc.wrapping_add(1), 4)), // NOP
@@ -348,7 +351,7 @@ impl CPU {
             }
             0x46 => {
                 // LD B, (HL)
-                self.reg.b = self.bus.read_byte(self.reg.hl());
+                self.reg.b = self.bus.read8(self.reg.hl());
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x47 => {
@@ -358,7 +361,7 @@ impl CPU {
             }
             0x06 => {
                 // LD B, n
-                self.reg.b = self.bus.read_byte(self.pc.wrapping_add(1));
+                self.reg.b = self.bus.read8(self.pc.wrapping_add(1));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0x48 => {
@@ -392,7 +395,7 @@ impl CPU {
             }
             0x4E => {
                 // LD C, (HL)
-                self.reg.c = self.bus.read_byte(self.reg.hl());
+                self.reg.c = self.bus.read8(self.reg.hl());
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x4F => {
@@ -402,7 +405,7 @@ impl CPU {
             }
             0x56 => {
                 // LD D, (HL)
-                self.reg.d = self.bus.read_byte(self.reg.hl());
+                self.reg.d = self.bus.read8(self.reg.hl());
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x57 => {
@@ -412,7 +415,7 @@ impl CPU {
             }
             0x5E => {
                 // LD E, (HL)
-                self.reg.e = self.bus.read_byte(self.reg.hl());
+                self.reg.e = self.bus.read8(self.reg.hl());
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x5F => {
@@ -451,7 +454,7 @@ impl CPU {
             }
             0x66 => {
                 // LD H, (HL)
-                self.reg.h = self.bus.read_byte(self.reg.hl());
+                self.reg.h = self.bus.read8(self.reg.hl());
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x67 => {
@@ -490,7 +493,7 @@ impl CPU {
             }
             0x6E => {
                 // LD L, (HL)
-                self.reg.l = self.bus.read_byte(self.reg.hl());
+                self.reg.l = self.bus.read8(self.reg.hl());
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x6F => {
@@ -500,37 +503,37 @@ impl CPU {
             }
             0x70 => {
                 // LD (HL), B
-                self.bus.write_byte(self.reg.hl(), self.reg.b);
+                self.bus.write8(self.reg.hl(), self.reg.b);
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x71 => {
                 // LD (HL), C
-                self.bus.write_byte(self.reg.hl(), self.reg.c);
+                self.bus.write8(self.reg.hl(), self.reg.c);
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x72 => {
                 // LD (HL), D
-                self.bus.write_byte(self.reg.hl(), self.reg.d);
+                self.bus.write8(self.reg.hl(), self.reg.d);
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x73 => {
                 // LD (HL), E
-                self.bus.write_byte(self.reg.hl(), self.reg.e);
+                self.bus.write8(self.reg.hl(), self.reg.e);
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x74 => {
                 // LD (HL), H
-                self.bus.write_byte(self.reg.hl(), self.reg.h);
+                self.bus.write8(self.reg.hl(), self.reg.h);
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x75 => {
                 // LD (HL), L
-                self.bus.write_byte(self.reg.hl(), self.reg.l);
+                self.bus.write8(self.reg.hl(), self.reg.l);
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x77 => {
                 // LD (HL), A
-                self.bus.write_byte(self.reg.hl(), self.reg.a);
+                self.bus.write8(self.reg.hl(), self.reg.a);
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x78 => {
@@ -565,7 +568,7 @@ impl CPU {
             }
             0x7E => {
                 // LD A, (HL)
-                self.reg.a = self.bus.read_byte(self.reg.hl());
+                self.reg.a = self.bus.read8(self.reg.hl());
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x7F => {
@@ -574,121 +577,138 @@ impl CPU {
             }
             0x02 => {
                 // LD (BC), A
-                self.bus.write_byte(self.reg.bc(), self.reg.a);
+                self.bus.write8(self.reg.bc(), self.reg.a);
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x12 => {
                 // LD (DE), A
-                self.bus.write_byte(self.reg.de(), self.reg.a);
+                self.bus.write8(self.reg.de(), self.reg.a);
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x22 => {
-                // LD (HL+), A
-                self.bus.write_byte(self.reg.hl(), self.reg.a);
+                // LDi (HL+), A
+                self.bus.write8(self.reg.hl(), self.reg.a);
                 self.reg.set_hl(self.reg.hl().wrapping_add(1));
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x32 => {
-                // LD (HL-), A
-                self.bus.write_byte(self.reg.hl(), self.reg.a);
+                // LDd (HL-), A
+                self.bus.write8(self.reg.hl(), self.reg.a);
+                self.reg.set_hl(self.reg.hl().wrapping_sub(1));
+                Ok((self.pc.wrapping_add(1), 8))
+            }
+            0x0A => {
+                // LD A, (BC)
+                self.reg.a = self.bus.read8(self.reg.bc());
+                Ok((self.pc.wrapping_add(1), 8))
+            }
+            0x1A => {
+                // LD A, (DE)
+                self.reg.a = self.bus.read8(self.reg.de());
+                Ok((self.pc.wrapping_add(1), 8))
+            }
+            0x2A => {
+                // LD A, (HL+)
+                self.reg.a = self.bus.read8(self.reg.hl());
+                self.reg.set_hl(self.reg.hl().wrapping_add(1));
+                Ok((self.pc.wrapping_add(1), 8))
+            }
+            0x3A => {
+                // LD A, (HL-)
+                self.reg.a = self.bus.read8(self.reg.hl());
                 self.reg.set_hl(self.reg.hl().wrapping_sub(1));
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x0E => {
                 // LD C, n
-                self.reg.c = self.bus.read_byte(self.pc.wrapping_add(1));
+                self.reg.c = self.bus.read8(self.pc.wrapping_add(1));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0x16 => {
                 // LD D, n
-                self.reg.d = self.bus.read_byte(self.pc.wrapping_add(1));
+                self.reg.d = self.bus.read8(self.pc.wrapping_add(1));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0x1E => {
                 // LD E, n
-                self.reg.e = self.bus.read_byte(self.pc.wrapping_add(1));
+                self.reg.e = self.bus.read8(self.pc.wrapping_add(1));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0x26 => {
                 // LD H, n
-                self.reg.h = self.bus.read_byte(self.pc.wrapping_add(1));
+                self.reg.h = self.bus.read8(self.pc.wrapping_add(1));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0x2E => {
                 // LD L, n
-                self.reg.l = self.bus.read_byte(self.pc.wrapping_add(1));
+                self.reg.l = self.bus.read8(self.pc.wrapping_add(1));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0x36 => {
                 // LD (HL), n
-                self.bus
-                    .write_byte(self.reg.hl(), self.bus.read_byte(self.pc.wrapping_add(1)));
+                let n = self.bus.read8(self.pc.wrapping_add(1));
+                self.bus.write8(self.reg.hl(), n);
                 Ok((self.pc.wrapping_add(2), 12))
             }
             0x3E => {
                 // LD A, n
-                self.reg.a = self.bus.read_byte(self.pc.wrapping_add(1));
+                self.reg.a = self.bus.read8(self.pc.wrapping_add(1));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0xE0 => {
                 // LDH (n), A
-                self.bus.write_byte(
-                    0xFF00 | (self.bus.read_byte(self.pc.wrapping_add(1)) as u16),
-                    self.reg.a,
-                );
+                let n = self.bus.read8(self.pc.wrapping_add(1)) as u16;
+                self.bus.write8(0xFF00 | n, self.reg.a);
                 Ok((self.pc.wrapping_add(2), 12))
             }
             0xF0 => {
                 // LDH A, (n)
-                self.reg.a = self
-                    .bus
-                    .read_byte(0xFF00 | (self.bus.read_byte(self.pc.wrapping_add(1)) as u16));
+                let n = self.bus.read8(self.pc.wrapping_add(1)) as u16;
+                self.reg.a = self.bus.read8(0xFF00 | n);
                 Ok((self.pc.wrapping_add(2), 12))
             }
             0xE2 => {
                 // LD (C), A
-                self.bus
-                    .write_byte(0xFF00 | (self.reg.c as u16), self.reg.a);
+                self.bus.write8(0xFF00 | (self.reg.c as u16), self.reg.a);
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0xF2 => {
                 // LD A, (C)
-                self.reg.a = self.bus.read_byte(0xFF00 | (self.reg.c as u16));
+                self.reg.a = self.bus.read8(0xFF00 | (self.reg.c as u16));
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0xEA => {
                 // LD (nn), A
-                self.bus
-                    .write_byte(self.bus.read_word(self.pc.wrapping_add(1)), self.reg.a);
+                let nn = self.bus.read16(self.pc.wrapping_add(1));
+                self.bus.write8(nn, self.reg.a);
                 Ok((self.pc.wrapping_add(3), 16))
             }
             0xFA => {
                 // LD A, (nn)
-                self.reg.a = self
-                    .bus
-                    .read_byte(self.bus.read_word(self.pc.wrapping_add(1)));
+                let nn = self.bus.read16(self.pc.wrapping_add(1));
+                self.reg.a = self.bus.read8(nn);
                 Ok((self.pc.wrapping_add(3), 16))
             }
 
             /* 16-bit load */
             0x01 => {
                 // LD BC, nn
-                self.reg.set_bc(self.bus.read_word(self.pc.wrapping_add(1)));
+                self.reg.set_bc(self.bus.read16(self.pc.wrapping_add(1)));
                 Ok((self.pc.wrapping_add(3), 12))
             }
             0x11 => {
                 // LD DE, nn
-                self.reg.set_de(self.bus.read_word(self.pc.wrapping_add(1)));
+                self.reg.set_de(self.bus.read16(self.pc.wrapping_add(1)));
                 Ok((self.pc.wrapping_add(3), 12))
             }
             0x21 => {
                 // LD HL, nn
-                self.reg.set_hl(self.bus.read_word(self.pc.wrapping_add(1)));
+                self.reg.set_hl(self.bus.read16(self.pc.wrapping_add(1)));
                 Ok((self.pc.wrapping_add(3), 12))
             }
             0x31 => {
                 // LD SP, nn
-                self.sp = self.bus.read_word(self.pc.wrapping_add(1));
+                self.sp = self.bus.read16(self.pc.wrapping_add(1));
                 Ok((self.pc.wrapping_add(3), 12))
             }
             0xF9 => {
@@ -698,7 +718,7 @@ impl CPU {
             }
             0xF8 => {
                 // LD HL, SP+n
-                let n = self.bus.read_byte(self.pc.wrapping_add(1)) as i8;
+                let n = self.bus.read8(self.pc.wrapping_add(1)) as i8;
                 let (result, overflow) = self.sp.overflowing_add(n as u16);
                 self.reg.set_hl(result);
                 self.reg.f.set_z(false);
@@ -711,8 +731,8 @@ impl CPU {
             }
             0x08 => {
                 // LD (nn), SP
-                self.bus
-                    .write_word(self.bus.read_word(self.pc.wrapping_add(1)), self.sp);
+                let nn = self.bus.read16(self.pc.wrapping_add(1));
+                self.bus.write16(nn, self.sp);
                 Ok((self.pc.wrapping_add(3), 20))
             }
             0xF5 => {
@@ -793,7 +813,8 @@ impl CPU {
             }
             0x86 => {
                 // ADD A, (HL)
-                self.add(self.bus.read_byte(self.reg.hl()));
+                let v = self.bus.read8(self.reg.hl());
+                self.add(v);
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x87 => {
@@ -803,7 +824,8 @@ impl CPU {
             }
             0xC6 => {
                 // ADD A, n
-                self.add(self.bus.read_byte(self.pc.wrapping_add(1)));
+                let n = self.bus.read8(self.pc.wrapping_add(1));
+                self.add(n);
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0x88 => {
@@ -838,7 +860,7 @@ impl CPU {
             }
             0x8E => {
                 // ADC A, (HL)
-                adc!(self, a, self.bus.read_byte(self.reg.hl()));
+                adc!(self, a, self.bus.read8(self.reg.hl()));
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x8F => {
@@ -848,7 +870,7 @@ impl CPU {
             }
             0xCE => {
                 // ADC A, n
-                adc!(self, a, self.bus.read_byte(self.pc.wrapping_add(1)));
+                adc!(self, a, self.bus.read8(self.pc.wrapping_add(1)));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0x90 => {
@@ -883,7 +905,7 @@ impl CPU {
             }
             0x96 => {
                 // SUB A, (HL)
-                sub!(self, a, self.bus.read_byte(self.reg.hl()));
+                sub!(self, a, self.bus.read8(self.reg.hl()));
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x97 => {
@@ -893,7 +915,7 @@ impl CPU {
             }
             0xD6 => {
                 // SUB A, n
-                sub!(self, a, self.bus.read_byte(self.pc.wrapping_add(1)));
+                sub!(self, a, self.bus.read8(self.pc.wrapping_add(1)));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0x98 => {
@@ -928,7 +950,7 @@ impl CPU {
             }
             0x9E => {
                 // SBC A, (HL)
-                sbc!(self, a, self.bus.read_byte(self.reg.hl()));
+                sbc!(self, a, self.bus.read8(self.reg.hl()));
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0x9F => {
@@ -938,7 +960,7 @@ impl CPU {
             }
             0xDE => {
                 // SBC A, n
-                sbc!(self, a, self.bus.read_byte(self.pc.wrapping_add(1)));
+                sbc!(self, a, self.bus.read8(self.pc.wrapping_add(1)));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0xA0 => {
@@ -973,7 +995,7 @@ impl CPU {
             }
             0xA6 => {
                 // AND A, (HL)
-                and!(self, a, self.bus.read_byte(self.reg.hl()));
+                and!(self, a, self.bus.read8(self.reg.hl()));
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0xA7 => {
@@ -983,7 +1005,7 @@ impl CPU {
             }
             0xE6 => {
                 // AND A, n
-                and!(self, a, self.bus.read_byte(self.pc.wrapping_add(1)));
+                and!(self, a, self.bus.read8(self.pc.wrapping_add(1)));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0xA8 => {
@@ -1018,7 +1040,7 @@ impl CPU {
             }
             0xAE => {
                 // XOR A, (HL)
-                xor!(self, a, self.bus.read_byte(self.reg.hl()));
+                xor!(self, a, self.bus.read8(self.reg.hl()));
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0xAF => {
@@ -1028,7 +1050,7 @@ impl CPU {
             }
             0xEE => {
                 // XOR A, n
-                xor!(self, a, self.bus.read_byte(self.pc.wrapping_add(1)));
+                xor!(self, a, self.bus.read8(self.pc.wrapping_add(1)));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0xB0 => {
@@ -1063,7 +1085,7 @@ impl CPU {
             }
             0xB6 => {
                 // OR A, (HL)
-                or!(self, a, self.bus.read_byte(self.reg.hl()));
+                or!(self, a, self.bus.read8(self.reg.hl()));
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0xB7 => {
@@ -1073,7 +1095,7 @@ impl CPU {
             }
             0xF6 => {
                 // OR A, n
-                or!(self, a, self.bus.read_byte(self.pc.wrapping_add(1)));
+                or!(self, a, self.bus.read8(self.pc.wrapping_add(1)));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0xB8 => {
@@ -1108,7 +1130,7 @@ impl CPU {
             }
             0xBE => {
                 // CP A, (HL)
-                cp!(self, a, self.bus.read_byte(self.reg.hl()));
+                cp!(self, a, self.bus.read8(self.reg.hl()));
                 Ok((self.pc.wrapping_add(1), 8))
             }
             0xBF => {
@@ -1118,7 +1140,7 @@ impl CPU {
             }
             0xFE => {
                 // CP A, n
-                cp!(self, a, self.bus.read_byte(self.pc.wrapping_add(1)));
+                cp!(self, a, self.bus.read8(self.pc.wrapping_add(1)));
                 Ok((self.pc.wrapping_add(2), 8))
             }
             0x04 => {
@@ -1153,12 +1175,12 @@ impl CPU {
             }
             0x34 => {
                 // INC (HL)
-                let value = self.bus.read_byte(self.reg.hl());
+                let value = self.bus.read8(self.reg.hl());
                 let result = value.wrapping_add(1);
                 self.reg.f.set_z(result == 0);
                 self.reg.f.set_s(false);
                 self.reg.f.set_h((value & 0xf) + 1 > 0xf);
-                self.bus.write_byte(self.reg.hl(), result);
+                self.bus.write8(self.reg.hl(), result);
                 Ok((self.pc.wrapping_add(1), 12))
             }
             0x3C => {
@@ -1198,12 +1220,12 @@ impl CPU {
             }
             0x35 => {
                 // DEC (HL)
-                let value = self.bus.read_byte(self.reg.hl());
+                let value = self.bus.read8(self.reg.hl());
                 let result = value.wrapping_sub(1);
                 self.reg.f.set_z(result == 0);
                 self.reg.f.set_s(true);
                 self.reg.f.set_h((value & 0xf) < 1);
-                self.bus.write_byte(self.reg.hl(), result);
+                self.bus.write8(self.reg.hl(), result);
                 Ok((self.pc.wrapping_add(1), 12))
             }
             0x3D => {
@@ -1259,7 +1281,7 @@ impl CPU {
             }
             0xE8 => {
                 // ADD SP, s8
-                let s = self.bus.read_byte(self.pc.wrapping_add(1)) as i8;
+                let s = self.bus.read8(self.pc.wrapping_add(1)) as i8;
                 let (result, overflow) = self.sp.overflowing_add(s as u16);
                 self.sp = result;
                 self.reg.f.set_z(false);
@@ -1356,12 +1378,12 @@ impl CPU {
             /* Jumps */
             0xC3 => {
                 // JP nn
-                Ok((self.bus.read_word(self.pc.wrapping_add(1)), 16))
+                Ok((self.bus.read16(self.pc.wrapping_add(1)), 16))
             }
             0xC2 => {
                 // JP NZ, nn
                 if !self.reg.f.zero {
-                    Ok((self.bus.read_word(self.pc.wrapping_add(1)), 16))
+                    Ok((self.bus.read16(self.pc.wrapping_add(1)), 16))
                 } else {
                     Ok((self.pc.wrapping_add(3), 12))
                 }
@@ -1369,7 +1391,7 @@ impl CPU {
             0xCA => {
                 // JP Z, nn
                 if self.reg.f.zero {
-                    Ok((self.bus.read_word(self.pc.wrapping_add(1)), 16))
+                    Ok((self.bus.read16(self.pc.wrapping_add(1)), 16))
                 } else {
                     Ok((self.pc.wrapping_add(3), 12))
                 }
@@ -1377,7 +1399,7 @@ impl CPU {
             0xD2 => {
                 // JP NC, nn
                 if !self.reg.f.carry {
-                    Ok((self.bus.read_word(self.pc.wrapping_add(1)), 16))
+                    Ok((self.bus.read16(self.pc.wrapping_add(1)), 16))
                 } else {
                     Ok((self.pc.wrapping_add(3), 12))
                 }
@@ -1385,7 +1407,7 @@ impl CPU {
             0xDA => {
                 // JP C, nn
                 if self.reg.f.carry {
-                    Ok((self.bus.read_word(self.pc.wrapping_add(1)), 16))
+                    Ok((self.bus.read16(self.pc.wrapping_add(1)), 16))
                 } else {
                     Ok((self.pc.wrapping_add(3), 12))
                 }
@@ -1396,13 +1418,13 @@ impl CPU {
             }
             0x18 => {
                 // JR s8
-                let s = self.bus.read_byte(self.pc.wrapping_add(1)) as i8;
+                let s = self.bus.read8(self.pc.wrapping_add(1)) as i8;
                 Ok((((self.pc + 2) as i32 + (s as i32)) as u16, 12))
             }
             0x20 => {
                 // JR NZ, s8
                 if !self.reg.f.zero {
-                    let s = self.bus.read_byte(self.pc.wrapping_add(1)) as i8;
+                    let s = self.bus.read8(self.pc.wrapping_add(1)) as i8;
                     Ok((((self.pc + 2) as i32 + (s as i32)) as u16, 12))
                 } else {
                     Ok((self.pc.wrapping_add(2), 8))
@@ -1411,7 +1433,7 @@ impl CPU {
             0x28 => {
                 // JR Z, s8
                 if self.reg.f.zero {
-                    let s = self.bus.read_byte(self.pc.wrapping_add(1)) as i8;
+                    let s = self.bus.read8(self.pc.wrapping_add(1)) as i8;
                     Ok((((self.pc + 2) as i32 + (s as i32)) as u16, 12))
                 } else {
                     Ok((self.pc.wrapping_add(2), 8))
@@ -1420,7 +1442,7 @@ impl CPU {
             0x30 => {
                 // JR NC, s8
                 if !self.reg.f.carry {
-                    let s = self.bus.read_byte(self.pc.wrapping_add(1)) as i8;
+                    let s = self.bus.read8(self.pc.wrapping_add(1)) as i8;
                     Ok((((self.pc + 2) as i32 + (s as i32)) as u16, 12))
                 } else {
                     Ok((self.pc.wrapping_add(2), 8))
@@ -1429,7 +1451,7 @@ impl CPU {
             0x38 => {
                 // JR C, s8
                 if self.reg.f.carry {
-                    let s = self.bus.read_byte(self.pc.wrapping_add(1)) as i8;
+                    let s = self.bus.read8(self.pc.wrapping_add(1)) as i8;
                     Ok((((self.pc + 2) as i32 + (s as i32)) as u16, 12))
                 } else {
                     Ok((self.pc.wrapping_add(2), 8))
@@ -1439,14 +1461,14 @@ impl CPU {
             /* Calls */
             0xCD => {
                 // CALL nn
-                let addr = self.bus.read_word(self.pc.wrapping_add(1));
+                let addr = self.bus.read16(self.pc.wrapping_add(1));
                 self.push(self.pc.wrapping_add(3));
                 Ok((addr, 24))
             }
             0xC4 => {
                 // CALL NZ, nn
                 if !self.reg.f.zero {
-                    let addr = self.bus.read_word(self.pc.wrapping_add(1));
+                    let addr = self.bus.read16(self.pc.wrapping_add(1));
                     self.push(self.pc.wrapping_add(3));
                     Ok((addr, 24))
                 } else {
@@ -1456,7 +1478,7 @@ impl CPU {
             0xCC => {
                 // CALL Z, nn
                 if self.reg.f.zero {
-                    let addr = self.bus.read_word(self.pc.wrapping_add(1));
+                    let addr = self.bus.read16(self.pc.wrapping_add(1));
                     self.push(self.pc.wrapping_add(3));
                     Ok((addr, 24))
                 } else {
@@ -1466,7 +1488,7 @@ impl CPU {
             0xD4 => {
                 // CALL NC, nn
                 if !self.reg.f.carry {
-                    let addr = self.bus.read_word(self.pc.wrapping_add(1));
+                    let addr = self.bus.read16(self.pc.wrapping_add(1));
                     self.push(self.pc.wrapping_add(3));
                     Ok((addr, 24))
                 } else {
@@ -1476,7 +1498,7 @@ impl CPU {
             0xDC => {
                 // CALL C, nn
                 if self.reg.f.carry {
-                    let addr = self.bus.read_word(self.pc.wrapping_add(1));
+                    let addr = self.bus.read16(self.pc.wrapping_add(1));
                     self.push(self.pc.wrapping_add(3));
                     Ok((addr, 24))
                 } else {
@@ -1606,7 +1628,7 @@ impl CPU {
 
             /* CB prefixed opcodes */
             0xCB => {
-                let opcode = self.bus.read_byte(self.pc.wrapping_add(1));
+                let opcode = self.bus.read8(self.pc.wrapping_add(1));
                 match opcode {
                     0x00 => {
                         // RLC B
@@ -1646,9 +1668,9 @@ impl CPU {
                     }
                     0x06 => {
                         // RLC (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.rlc(value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x07 => {
@@ -1695,9 +1717,9 @@ impl CPU {
                     }
                     0x0E => {
                         // RRC (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.rrc(value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x0F => {
@@ -1744,9 +1766,9 @@ impl CPU {
                     }
                     0x16 => {
                         // RL (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.rl(value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x17 => {
@@ -1793,9 +1815,9 @@ impl CPU {
                     }
                     0x1E => {
                         // RR (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.rr(value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x1F => {
@@ -1842,9 +1864,9 @@ impl CPU {
                     }
                     0x26 => {
                         // SLA (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.sla(value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x27 => {
@@ -1891,9 +1913,9 @@ impl CPU {
                     }
                     0x2E => {
                         // SRA (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.sra(value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x2F => {
@@ -1940,9 +1962,9 @@ impl CPU {
                     }
                     0x36 => {
                         // SWAP (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.swap(value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x37 => {
@@ -1989,9 +2011,9 @@ impl CPU {
                     }
                     0x3E => {
                         // SRL (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.srl(value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x3F => {
@@ -2032,7 +2054,7 @@ impl CPU {
                     }
                     0x46 => {
                         // BIT 0, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         self.bit(0, value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
@@ -2073,7 +2095,7 @@ impl CPU {
                     }
                     0x4E => {
                         // BIT 1, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         self.bit(1, value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
@@ -2114,7 +2136,7 @@ impl CPU {
                     }
                     0x56 => {
                         // BIT 2, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         self.bit(2, value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
@@ -2155,7 +2177,7 @@ impl CPU {
                     }
                     0x5E => {
                         // BIT 3, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         self.bit(3, value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
@@ -2196,7 +2218,7 @@ impl CPU {
                     }
                     0x66 => {
                         // BIT 4, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         self.bit(4, value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
@@ -2237,7 +2259,7 @@ impl CPU {
                     }
                     0x6E => {
                         // BIT 5, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         self.bit(5, value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
@@ -2278,7 +2300,7 @@ impl CPU {
                     }
                     0x76 => {
                         // BIT 6, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         self.bit(6, value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
@@ -2319,7 +2341,7 @@ impl CPU {
                     }
                     0x7E => {
                         // BIT 7, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         self.bit(7, value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
@@ -2366,9 +2388,9 @@ impl CPU {
                     }
                     0x86 => {
                         // RES 0, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.res(0, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x87 => {
@@ -2415,9 +2437,9 @@ impl CPU {
                     }
                     0x8E => {
                         // RES 1, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.res(1, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x8F => {
@@ -2464,9 +2486,9 @@ impl CPU {
                     }
                     0x96 => {
                         // RES 2, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.res(2, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x97 => {
@@ -2513,9 +2535,9 @@ impl CPU {
                     }
                     0x9E => {
                         // RES 3, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.res(3, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0x9F => {
@@ -2562,9 +2584,9 @@ impl CPU {
                     }
                     0xA6 => {
                         // RES 4, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.res(4, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xA7 => {
@@ -2611,9 +2633,9 @@ impl CPU {
                     }
                     0xAE => {
                         // RES 5, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.res(5, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xAF => {
@@ -2660,9 +2682,9 @@ impl CPU {
                     }
                     0xB6 => {
                         // RES 6, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.res(6, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xB7 => {
@@ -2709,9 +2731,9 @@ impl CPU {
                     }
                     0xBE => {
                         // RES 7, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.res(7, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xBF => {
@@ -2758,9 +2780,9 @@ impl CPU {
                     }
                     0xC6 => {
                         // SET 0, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.set(0, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xC7 => {
@@ -2807,9 +2829,9 @@ impl CPU {
                     }
                     0xCE => {
                         // SET 1, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.set(1, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xCF => {
@@ -2856,9 +2878,9 @@ impl CPU {
                     }
                     0xD6 => {
                         // SET 2, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.set(2, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xD7 => {
@@ -2905,9 +2927,9 @@ impl CPU {
                     }
                     0xDE => {
                         // SET 3, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.set(3, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xDF => {
@@ -2954,9 +2976,9 @@ impl CPU {
                     }
                     0xE6 => {
                         // SET 4, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.set(4, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xE7 => {
@@ -3003,9 +3025,9 @@ impl CPU {
                     }
                     0xEE => {
                         // SET 5, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.set(5, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xEF => {
@@ -3052,9 +3074,9 @@ impl CPU {
                     }
                     0xF6 => {
                         // SET 6, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.set(6, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xF7 => {
@@ -3101,9 +3123,9 @@ impl CPU {
                     }
                     0xFE => {
                         // SET 7, (HL)
-                        let value = self.bus.read_byte(self.reg.hl());
+                        let value = self.bus.read8(self.reg.hl());
                         let new_value = self.set(7, value);
-                        self.bus.write_byte(self.reg.hl(), new_value);
+                        self.bus.write8(self.reg.hl(), new_value);
                         Ok((self.pc.wrapping_add(2), 16))
                     }
                     0xFF => {
@@ -3115,7 +3137,7 @@ impl CPU {
                     _ => panic!("Invalid opcode: 0xCB{:02X}", opcode),
                 }
             }
-            _ => panic!("Invalid opcode: 0x{:02X}", instruction),
+            _ => panic!("Invalid opcode: 0x{:X}", instruction),
         }
     }
 }

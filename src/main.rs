@@ -8,35 +8,39 @@ use tracing::{debug, info};
 use winit::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
-    event_loop::EventLoop,
+    event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
 
-use crate::cpu::CPU;
+use crate::{cpu::Cpu, emulator::Gameboy};
 
 mod apu;
+mod clock;
 mod cpu;
+mod emulator;
+mod fs;
 mod gpu;
+mod joypad;
 mod memory;
+mod timer;
 mod util;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let matches = cli().get_matches();
 
-    info!("Starting Emulator");
-
-    let mut cpu = CPU::new();
+    info!("Starting Gameboy");
 
     // load game rom
-    let bios = fs_read(
+    let rom = fs::read(
         matches
-            .get_one::<PathBuf>("bios")
-            .expect("Invalid BIOS path")
+            .get_one::<PathBuf>("rom")
+            .expect("Invalid game rom path")
             .to_path_buf(),
     )?;
 
-    cpu.load_bios(bios);
+    let mut gb = Gameboy::new();
+    gb.load_rom(rom);
 
     let event_loop = EventLoop::new();
     let window = {
@@ -53,29 +57,34 @@ fn main() -> Result<()> {
         Pixels::new(SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32, surface_texture)?
     };
 
-    let mut ticks = 0;
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Poll;
+        match event {
+            Event::WindowEvent { event, .. } => match event {
+                WindowEvent::CloseRequested => control_flow.set_exit(),
+                _ => (),
+            },
+            Event::MainEventsCleared => {
+                gb.update();
+                let frame = pixels.frame_mut();
+                for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
+                    let screen = gb.get_screen();
+                    let r = screen[i];
+                    let g = screen[i + 1];
+                    let b = screen[i + 2];
+                    let a = screen[i + 3];
+                    pixel.copy_from_slice(&[r, g, b, a]);
+                }
 
-    event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { event, .. } => match event {
-            WindowEvent::CloseRequested => control_flow.set_exit(),
+                if let Err(err) = pixels.render() {
+                    eprintln!("Error rendering pixels: {}", err);
+                    *control_flow = winit::event_loop::ControlFlow::Exit;
+                    return;
+                }
+            }
             _ => (),
-        },
-        Event::RedrawRequested(_) => {
-            let cycles = cpu.step();
-            for (i, pixel) in cpu.bus.gpu.screen.chunks(4).enumerate() {}
-            thread::sleep(Duration::from_nanos(2))
         }
-        Event::MainEventsCleared => {
-            window.request_redraw();
-        }
-        _ => (),
     });
-}
-
-fn fs_read(path: PathBuf) -> Result<Vec<u8>> {
-    debug!("Loading bytes from path: {:?}", path);
-    let bytes = std::fs::read(path)?;
-    Ok(bytes)
 }
 
 fn cli() -> Command {
@@ -83,9 +92,5 @@ fn cli() -> Command {
         .version("0.1.0")
         .author(clap::crate_authors!())
         .about("A Gameboy emulator written in Rust")
-        .arg(
-            arg!(-b --bios <FILE> "Path the the BIOS bin file")
-                .value_parser(value_parser!(PathBuf)),
-        )
         .arg(arg!(-r --rom <FILE> "Path to the game ROM").value_parser(value_parser!(PathBuf)))
 }

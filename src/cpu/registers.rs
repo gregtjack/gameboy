@@ -130,7 +130,7 @@ impl Registers {
     }
 
     pub fn hl(&self) -> u16 {
-        addr!(self.h, self.l)
+        ((self.h as u16) << 8) | (self.l as u16)
     }
 
     pub fn set_hl(&mut self, value: u16) {
