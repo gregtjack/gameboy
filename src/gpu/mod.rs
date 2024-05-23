@@ -1,8 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::memory::{
-    interrupts::{Interrupt, InterruptVector, Interrupts},
-    Memory, OAM_BEGIN, OAM_END, UNDEFINED, VRAM_BEGIN, VRAM_END, VRAM_LEN,
+use crate::mmu::{
+    interrupts::{InterruptFlag, InterruptVector}, map::{OAM_BEGIN, OAM_END, VRAM_BEGIN, VRAM_END, VRAM_LEN}, Memory, UNDEFINED
 };
 
 use self::{
@@ -87,7 +86,7 @@ pub struct Gpu {
     pub stat: Stat,
     pub v_blank: bool,
     pub h_blank: bool,
-    pub int: InterruptVector,
+    pub int: Rc<RefCell<InterruptVector>>,
     // Specifies the position in the 256x256 pixels BG map (32x32 tiles) which is to be displayed at the upper/left LCD
     // display position.
     pub sx: u8,
@@ -121,22 +120,22 @@ pub struct Gpu {
 }
 
 impl Gpu {
-    pub fn new() -> Self {
+    pub fn new(intf: Rc<RefCell<InterruptVector>>) -> Self {
         Self {
             vram: [0; VRAM_LEN],
             screen: [0; SCREEN_WIDTH * SCREEN_HEIGHT * 3],
-            int: InterruptVector::new(),
+            int: intf,
             v_blank: false,
             h_blank: false,
-            lcdc: lcdc::Lcdc::new(),
+            lcdc: Lcdc::from(0x91),
             stat: stat::Stat::new(),
             sx: 0,
             sy: 0,
             ly: 0,
             lyc: 0,
-            bgp: 0,
-            op0: 0,
-            op1: 1,
+            bgp: 0xFC,
+            op0: 0xFF,
+            op1: 0xFF,
             wx: 0,
             wy: 0,
             oam: [0; 0xA0],
@@ -172,7 +171,7 @@ impl Gpu {
                     if self.ly >= SCANLINES_DISPLAY {
                         self.set_mode(Mode::VBlank);
                         // render screen
-                        self.int.vblank = true;
+                        self.int.borrow_mut().set_flag(InterruptFlag::VBlank);
                     } else {
                         self.set_scanline(self.ly + 1);
                         self.set_mode(Mode::OAM);
@@ -197,7 +196,7 @@ impl Gpu {
         if self.lyc == self.ly {
             self.stat.coincidence_flag = true;
             if self.stat.coincidence_interrupt {
-                self.int.lcd_stat = true;
+                self.int.borrow_mut().set_flag(InterruptFlag::LCDStat);
             }
         }
     }
@@ -212,17 +211,17 @@ impl Gpu {
         match self.stat.mode {
             Mode::OAM => {
                 if self.stat.oam_interrupt {
-                    self.int.lcd_stat = true;
+                    self.int.borrow_mut().set_flag(InterruptFlag::LCDStat);
                 }
             }
             Mode::HBlank => {
                 if self.stat.hblank_interrupt {
-                    self.int.lcd_stat = true;
+                    self.int.borrow_mut().set_flag(InterruptFlag::LCDStat);
                 }
             }
             Mode::VBlank => {
                 if self.stat.vblank_interrupt {
-                    self.int.lcd_stat = true;
+                    self.int.borrow_mut().set_flag(InterruptFlag::LCDStat);
                 }
             }
             _ => {}
@@ -335,7 +334,7 @@ impl Memory for Gpu {
             0xFF41 => self.stat.into(),
             0xFF42 => self.sy,
             0xFF43 => self.sx,
-            0xFF44 => self.ly,
+            0xFF44 => 0x90,
             0xFF45 => self.lyc,
             0xFF46 => UNDEFINED,
             0xFF47 => self.bgp,
@@ -343,7 +342,7 @@ impl Memory for Gpu {
             0xFF49 => self.op1,
             0xFF4A => self.wy,
             0xFF4B => self.wx,
-            _ => panic!("[GPU] Invalid address: {:X}", address),
+            _ => panic!("[gpu] read: invalid address {:02x}", address),
         }
     }
 
@@ -364,7 +363,7 @@ impl Memory for Gpu {
             0xFF49 => self.op1 = value,
             0xFF4A => self.wy = value,
             0xFF4B if value >= 7 => self.wx = value,
-            _ => panic!("[GPU] Invalid address: {:X}", address),
+            _ => panic!("[gpu] write: invalid address {:02x}", address),
         }
     }
 }

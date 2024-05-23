@@ -1,4 +1,4 @@
-default: 
+@default: 
     just --list
 
 doc: 
@@ -9,3 +9,7 @@ run:
 
 test: 
     cargo test
+
+doctor TEST:
+    cargo run --release -- -d --rom 'test/{{TEST}}' > test.log
+    sed -i '1,2d' test.log

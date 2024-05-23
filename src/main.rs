@@ -21,14 +21,16 @@ mod emulator;
 mod fs;
 mod gpu;
 mod joypad;
-mod memory;
+mod mmu;
 mod timer;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // tracing_subscriber::fmt::init();
     let matches = cli().get_matches();
 
     info!("Starting Gameboy");
+
+    let mut gb = Gameboy::new(matches.get_flag("debug"));
 
     // load game rom
     let rom = fs::read(
@@ -37,8 +39,6 @@ fn main() -> Result<()> {
             .expect("Invalid game rom path")
             .to_path_buf(),
     )?;
-
-    let mut gb = Gameboy::new();
     gb.load_rom(rom);
 
     let event_loop = EventLoop::new();
@@ -71,7 +71,7 @@ fn main() -> Result<()> {
                     let r = screen[i];
                     let g = screen[i + 1];
                     let b = screen[i + 2];
-                    pixel.copy_from_slice(&[r, g, b, 1]);
+                    pixel.copy_from_slice(&[r, g, b, 0xFF]);
                 }
 
                 if let Err(err) = pixels.render() {
@@ -91,4 +91,5 @@ fn cli() -> Command {
         .author(clap::crate_authors!())
         .about("A Gameboy emulator written in Rust")
         .arg(arg!(-r --rom <FILE> "Path to the game ROM").value_parser(value_parser!(PathBuf)))
+        .arg(arg!(-d --debug "Turn on debugging mode"))
 }

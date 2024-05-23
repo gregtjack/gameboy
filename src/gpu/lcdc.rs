@@ -23,10 +23,10 @@ impl Lcdc {
     pub fn new() -> Self {
         Self {
             lcd_enable: false,
-            window_tile_map_display_select: false,
+            window_tile_map_display_select: true,
             window_display_enable: false,
             bg_window_tile_data_select: false,
-            bg_tile_map_display_select: false,
+            bg_tile_map_display_select: true,
             obj_size: false,
             obj_display_enable: false,
             bg_display: false,
