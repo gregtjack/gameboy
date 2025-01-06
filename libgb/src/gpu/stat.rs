@@ -29,6 +29,7 @@ impl Stat {
 }
 
 impl From<Stat> for u8 {
+    #[inline]
     fn from(value: Stat) -> Self {
         let mut byte = 0;
         let mode: u8 = value.mode.into();
@@ -43,6 +44,7 @@ impl From<Stat> for u8 {
 }
 
 impl From<u8> for Stat {
+    #[inline]
     fn from(byte: u8) -> Self {
         let mode = Mode::from(byte & 0b11);
         let coincidence_flag = ((byte >> 2) & 1) != 0;
@@ -68,24 +70,23 @@ impl From<u8> for Stat {
 // Mode 0 is present between 201-207 clks, 2 about 77-83 clks, and 3 about 169-175 clks.
 // A complete cycle through these states takes 456 clks. VBlank lasts 4560 clks.
 // A complete screen refresh occurs every 70224 clks.)
-//
-// Mode 0: The LCD controller is in the H-Blank period and
-//         the CPU can access both the display RAM (8000h-9FFFh)
-//         and OAM (FE00h-FE9Fh)
-// Mode 1: The LCD contoller is in the V-Blank period (or the
-//         display is disabled) and the CPU can access both the
-//         display RAM (8000h-9FFFh) and OAM (FE00h-FE9Fh).
-// Mode 2: The LCD controller is reading from OAM memory.
-//         the CPU <cannot> access OAM memory (FE00h-FE9Fh)
-//         during this period.
-// Mode 3: The LCD controller is reading from both OAM and VRAM,
-//         The CPU <cannot> access OAM and VRAM during this period.
-//         CGB Mode: Cannot access Palette Data (FF69,FF6B) either.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum Mode {
+    /// Mode 0: The LCD controller is in the H-Blank period and
+    ///         the CPU can access both the display RAM (8000h-9FFFh)
+    ///         and OAM (FE00h-FE9Fh)
     HBlank,
+    /// Mode 1: The LCD contoller is in the V-Blank period (or the
+    ///         display is disabled) and the CPU can access both the
+    ///         display RAM (8000h-9FFFh) and OAM (FE00h-FE9Fh).
     VBlank,
+    /// Mode 2: The LCD controller is reading from OAM memory.
+    ///         the CPU <cannot> access OAM memory (FE00h-FE9Fh)
+    ///         during this period.
     OAM,
+    /// Mode 3: The LCD controller is reading from both OAM and VRAM,
+    ///         The CPU <cannot> access OAM and VRAM during this period.
+    ///         CGB Mode: Cannot access Palette Data (FF69,FF6B) either.
     VRAM,
 }
 
@@ -101,6 +102,7 @@ impl Mode {
 }
 
 impl From<Mode> for u8 {
+    #[inline]
     fn from(mode: Mode) -> u8 {
         match mode {
             Mode::HBlank => 0,
@@ -112,6 +114,7 @@ impl From<Mode> for u8 {
 }
 
 impl From<u8> for Mode {
+    #[inline]
     fn from(byte: u8) -> Self {
         match byte {
             0 => Mode::HBlank,

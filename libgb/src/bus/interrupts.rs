@@ -1,4 +1,3 @@
-use std::ops::{BitAnd, BitOrAssign};
 
 pub enum InterruptFlag {
     VBlank,
@@ -9,11 +8,11 @@ pub enum InterruptFlag {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InterruptVector {
+pub struct Interrupts {
     pub data: u8,
 }
 
-impl InterruptVector {
+impl Interrupts {
     pub fn new() -> Self {
         Self { data: 0x0 }
     }

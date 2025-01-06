@@ -1,10 +1,7 @@
-use std::{path::PathBuf, thread, time::Duration};
-
+use std::path::PathBuf;
 use clap::{arg, value_parser, Command};
-use color_eyre::eyre::Result;
-use gpu::{SCREEN_HEIGHT, SCREEN_WIDTH};
 use pixels::{Pixels, SurfaceTexture};
-use tracing::{debug, info};
+use anyhow::Result;
 use winit::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -12,66 +9,63 @@ use winit::{
     window::WindowBuilder,
 };
 
-use crate::{cpu::Cpu, emulator::Gameboy};
+use libgb::gameboy::{Gameboy, SCREEN_WIDTH, SCREEN_HEIGHT};
 
-mod apu;
-mod clock;
-mod cpu;
-mod emulator;
-mod fs;
-mod gpu;
-mod joypad;
-mod mmu;
-mod timer;
+mod utils;
 
-fn main() -> Result<()> {
-    // tracing_subscriber::fmt::init();
+fn main() {
     let matches = cli().get_matches();
 
-    info!("Starting Gameboy");
+    println!("Starting Gameboy");
 
-    let mut gb = Gameboy::new(matches.get_flag("debug"));
+    let mut gameboy = Gameboy::new(matches.get_flag("debug"));
 
     // load game rom
-    let rom = fs::read(
+    let rom = utils::fs::read(
         matches
             .get_one::<PathBuf>("rom")
             .expect("Invalid game rom path")
             .to_path_buf(),
-    )?;
-    gb.load_rom(rom);
+    ).unwrap();
+
+    gameboy.load_rom(rom);
+
+    println!("Loaded ROM");
 
     let event_loop = EventLoop::new();
     let window = {
-        let size = LogicalSize::new(SCREEN_WIDTH as f64, SCREEN_HEIGHT as f64);
         WindowBuilder::new()
-            .with_title("Gameboy Emulator")
-            .with_inner_size(size)
-            .build(&event_loop)?
+            .with_title("Gameboy")
+            .with_inner_size(LogicalSize::new(SCREEN_WIDTH as f64 * 2.0, SCREEN_HEIGHT as f64 * 2.0))
+            .build(&event_loop)
+            .expect("Window should have been initialized successfully")
     };
 
     let mut pixels = {
         let window_size = window.inner_size();
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-        Pixels::new(SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32, surface_texture)?
+        Pixels::new(SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32, surface_texture).unwrap()
     };
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
+        gameboy.update();
         match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => control_flow.set_exit(),
+                WindowEvent::Resized(size) => {
+                    pixels.resize_surface(size.width, size.height).unwrap();
+                }
                 _ => (),
             },
             Event::MainEventsCleared => {
-                gb.update();
                 let frame = pixels.frame_mut();
+                let screen = gameboy.frame();
                 for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
-                    let screen = gb.get_screen();
-                    let r = screen[i];
-                    let g = screen[i + 1];
-                    let b = screen[i + 2];
-                    pixel.copy_from_slice(&[r, g, b, 0xFF]);
+                    let x = (i % SCREEN_WIDTH as usize) as i16;
+                    let y = (i / SCREEN_WIDTH as usize) as i16;
+                    let [r, g, b, a] = screen[x as usize][y as usize].rgba();
+                    pixel.copy_from_slice(&[r, g, b, a]);
                 }
 
                 if let Err(err) = pixels.render() {

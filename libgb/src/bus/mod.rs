@@ -1,50 +1,48 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::utils::addressable::Addressable;
 use crate::{gpu::Gpu, timer::Timer};
 
-use self::interrupts::InterruptVector;
-use self::map::*;
-
 pub mod interrupts;
+
+use self::interrupts::Interrupts;
 
 pub const UNDEFINED: u8 = 0xFF;
 
 /// The Gameboy memory map
-pub mod map {
-    pub const BIOS_LEN: usize = 256;
+pub const BIOS_LEN: usize = 256;
 
-    pub const ROM_BEGIN: usize = 0x0000;
-    pub const ROM_END: usize = 0x7FFF;
-    pub const ROM_LEN: usize = ROM_END - ROM_BEGIN + 1;
+pub const ROM_BEGIN: usize = 0x0000;
+pub const ROM_END: usize = 0x7FFF;
+pub const ROM_LEN: usize = ROM_END - ROM_BEGIN + 1;
 
-    pub const VRAM_BEGIN: usize = 0x8000;
-    pub const VRAM_END: usize = 0x9FFF;
-    pub const VRAM_LEN: usize = VRAM_END - VRAM_BEGIN + 1;
+pub const VRAM_BEGIN: usize = 0x8000;
+pub const VRAM_END: usize = 0x9FFF;
+pub const VRAM_LEN: usize = VRAM_END - VRAM_BEGIN + 1;
 
-    pub const ERAM_BEGIN: usize = 0xA000;
-    pub const ERAM_END: usize = 0xBFFF;
-    pub const ERAM_LEN: usize = ERAM_END - ERAM_BEGIN + 1;
+pub const ERAM_BEGIN: usize = 0xA000;
+pub const ERAM_END: usize = 0xBFFF;
+pub const ERAM_LEN: usize = ERAM_END - ERAM_BEGIN + 1;
 
-    pub const WRAM_BEGIN: usize = 0xC000;
-    pub const WRAM_END: usize = 0xDFFF;
-    pub const WRAM_LEN: usize = WRAM_END - WRAM_BEGIN + 1;
+pub const WRAM_BEGIN: usize = 0xC000;
+pub const WRAM_END: usize = 0xDFFF;
+pub const WRAM_LEN: usize = WRAM_END - WRAM_BEGIN + 1;
 
-    pub const ECHO_BEGIN: usize = 0xE000;
-    pub const ECHO_END: usize = 0xFDFF;
-    pub const ECHO_LEN: usize = ECHO_END - ECHO_BEGIN + 1;
+pub const ECHO_BEGIN: usize = 0xE000;
+pub const ECHO_END: usize = 0xFDFF;
+pub const ECHO_LEN: usize = ECHO_END - ECHO_BEGIN + 1;
 
-    pub const OAM_BEGIN: usize = 0xFE00;
-    pub const OAM_END: usize = 0xFE9F;
-    pub const OAM_LEN: usize = OAM_END - OAM_BEGIN + 1;
+pub const OAM_BEGIN: usize = 0xFE00;
+pub const OAM_END: usize = 0xFE9F;
+pub const OAM_LEN: usize = OAM_END - OAM_BEGIN + 1;
 
-    pub const ZRAM_BEGIN: usize = 0xFF80;
-    pub const ZRAM_END: usize = 0xFFFE;
-    pub const ZRAM_LEN: usize = ZRAM_END - ZRAM_BEGIN + 1;
+pub const ZRAM_BEGIN: usize = 0xFF80;
+pub const ZRAM_END: usize = 0xFFFE;
+pub const ZRAM_LEN: usize = ZRAM_END - ZRAM_BEGIN + 1;
 
-    pub const INTERRUPT_FLAGS: usize = 0xFF0F;
-    pub const INTERRUPT_ENABLE: usize = 0xFFFF;
-}
+pub const INTERRUPT_FLAGS: usize = 0xFF0F;
+pub const INTERRUPT_ENABLE: usize = 0xFFFF;
 
 /// DMG Gameboy boot ROM
 const BIOS: [u8; BIOS_LEN] = [
@@ -66,29 +64,9 @@ const BIOS: [u8; BIOS_LEN] = [
     0xF5, 0x06, 0x19, 0x78, 0x86, 0x23, 0x05, 0x20, 0xFB, 0x86, 0x20, 0xFE, 0x3E, 0x01, 0xE0, 0x50,
 ];
 
-/// A trait for performing read and write operations
-pub trait Memory {
-    /// Read a byte from memory
-    fn read8(&self, addr: u16) -> u8;
-
-    /// Write a byte to memory
-    fn write8(&mut self, addr: u16, value: u8);
-
-    /// Read a word from memory
-    fn read16(&self, addr: u16) -> u16 {
-        (self.read8(addr) as u16) | (self.read8(addr + 1) as u16) << 8
-    }
-
-    /// Write a word to memory
-    fn write16(&mut self, addr: u16, value: u16) {
-        self.write8(addr, (value & 0xFF) as u8);
-        self.write8(addr + 1, (value >> 8) as u8);
-    }
-}
-
 /// Gameboy memory
 #[derive(Debug)]
-pub struct Mmu {
+pub struct Bus {
     pub in_bios: bool,
     pub bios: [u8; BIOS_LEN],
     pub rom: [u8; ROM_LEN],
@@ -101,14 +79,14 @@ pub struct Mmu {
     pub sc: u8,
     pub joypad: u8,
     pub gpu: Gpu,
-    pub intf: Rc<RefCell<InterruptVector>>,
+    pub intf: Rc<RefCell<Interrupts>>,
     pub inte: u8,
     pub timer: Timer,
 }
 
-impl Mmu {
+impl Bus {
     pub fn new() -> Self {
-        let intf = Rc::new(RefCell::new(InterruptVector::new()));
+        let intf = Rc::new(RefCell::new(Interrupts::new()));
         Self {
             gpu: Gpu::new(intf.clone()),
             timer: Timer::new(intf.clone()),
@@ -129,12 +107,11 @@ impl Mmu {
     pub fn step(&mut self, cycles: u32) {
         self.gpu.step(cycles);
         self.timer.step(cycles);
-        self.intf.borrow_mut().reset();
     }
 }
 
-impl Memory for Mmu {
-    fn read8(&self, addr: u16) -> u8 {
+impl Addressable for Bus {
+    fn read_byte(&self, addr: u16) -> u8 {
         let addr = addr as usize;
         match addr {
             ROM_BEGIN..=ROM_END => {
@@ -144,18 +121,18 @@ impl Memory for Mmu {
                     self.rom[addr]
                 }
             }
-            VRAM_BEGIN..=VRAM_END => self.gpu.read8(addr as u16),
+            VRAM_BEGIN..=VRAM_END => self.gpu.read_byte(addr as u16),
             ERAM_BEGIN..=ERAM_END => self.eram[addr - ERAM_BEGIN],
             WRAM_BEGIN..=ECHO_END => self.wram[addr - WRAM_BEGIN],
-            OAM_BEGIN..=OAM_END => self.gpu.read8(addr as u16),
+            OAM_BEGIN..=OAM_END => self.gpu.read_byte(addr as u16),
             0xFF00 => self.joypad,
             0xFF01 => self.sb,
             0xFF02 => self.sc,
-            0xFF04..=0xFF07 => self.timer.read8(addr as u16),
+            0xFF04..=0xFF07 => self.timer.read_byte(addr as u16),
             // TODO: audio
             0xFF10..=0xFF26 => 0,
             0xFF30..=0xFF3F => 0,
-            0xFF40..=0xFF4B => self.gpu.read8(addr as u16),
+            0xFF40..=0xFF4B => self.gpu.read_byte(addr as u16),
             ZRAM_BEGIN..=ZRAM_END => self.zram[addr - ZRAM_BEGIN],
             INTERRUPT_FLAGS => self.intf.borrow().data,
             INTERRUPT_ENABLE => self.inte,
@@ -163,7 +140,7 @@ impl Memory for Mmu {
         }
     }
 
-    fn write8(&mut self, addr: u16, value: u8) {
+    fn write_byte(&mut self, addr: u16, value: u8) {
         let addr = addr as usize;
         match addr {
             ROM_BEGIN..=ROM_END => {
@@ -173,28 +150,22 @@ impl Memory for Mmu {
                     self.rom[addr] = value;
                 }
             }
-            VRAM_BEGIN..=VRAM_END => self.gpu.write8(addr as u16, value),
+            VRAM_BEGIN..=VRAM_END => self.gpu.write_byte(addr as u16, value),
             ERAM_BEGIN..=ERAM_END => self.eram[addr - ERAM_BEGIN] = value,
             WRAM_BEGIN..=ECHO_END => self.wram[addr - WRAM_BEGIN] = value,
-            OAM_BEGIN..=OAM_END => self.gpu.write8(addr as u16, value),
+            OAM_BEGIN..=OAM_END => self.gpu.write_byte(addr as u16, value),
             0xFF00 => self.joypad = value,
             0xFF01 => self.sb = value,
             0xFF02 => self.sc = value,
-            0xFF04..=0xFF07 => self.timer.write8(addr as u16, value),
+            0xFF04..=0xFF07 => self.timer.write_byte(addr as u16, value),
             // TODO: audio
             0xFF10..=0xFF26 => (),
             0xFF30..=0xFF3F => (),
-            0xFF40..=0xFF45 => self.gpu.write8(addr as u16, value),
+            0xFF40..=0xFF45 => self.gpu.write_byte(addr as u16, value),
             0xFF46 => {
-                // DMA transfer
-                todo!("DMA is not correct :(");
-                // let start_addr = (value as u16) << 8;
-                // for i in 0..0xA0 {
-                //     let byte = self.read8(start_addr + i);
-                //     self.write8(0xFE00 + i, byte);
-                // }
+                // TODO: DMA transfer
             }
-            0xFF47..=0xFF4B => self.gpu.write8(addr as u16, value),
+            0xFF47..=0xFF4B => self.gpu.write_byte(addr as u16, value),
             ZRAM_BEGIN..=ZRAM_END => self.zram[addr - ZRAM_BEGIN] = value,
             // Interrupts
             INTERRUPT_FLAGS => self.intf.borrow_mut().data = value,

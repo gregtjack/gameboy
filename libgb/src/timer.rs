@@ -1,12 +1,6 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::mmu::{interrupts::{InterruptFlag, InterruptVector}, Memory};
-
-const DIVIDER_CYCLES: u32 = 256;
-const SPEED_0_CYCLES: u32 = 1024;
-const SPEED_1_CYCLES: u32 = 16;
-const SPEED_2_CYCLES: u32 = 64;
-const SPEED_3_CYCLES: u32 = 256;
+use crate::{bus::interrupts::{InterruptFlag, Interrupts}, utils::addressable::Addressable};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TimerControl {
@@ -78,11 +72,11 @@ pub struct Timer {
     /// timer control
     pub tac: TimerControl,
     /// interrupt state
-    pub int: Rc<RefCell<InterruptVector>>,
+    pub int: Rc<RefCell<Interrupts>>,
 }
 
 impl Timer {
-    pub fn new(intf: Rc<RefCell<InterruptVector>>) -> Self {
+    pub fn new(intf: Rc<RefCell<Interrupts>>) -> Self {
         Self {
             div: 0,
             tima: 0,
@@ -131,8 +125,8 @@ impl Timer {
     }
 }
 
-impl Memory for Timer {
-    fn read8(&self, addr: u16) -> u8 {
+impl Addressable for Timer {
+    fn read_byte(&self, addr: u16) -> u8 {
         let addr = addr as usize;
         match addr {
             0xFF04 => self.div,
@@ -143,7 +137,7 @@ impl Memory for Timer {
         }
     }
 
-    fn write8(&mut self, addr: u16, value: u8) {
+    fn write_byte(&mut self, addr: u16, value: u8) {
         let addr = addr as usize;
         match addr {
             0xFF04 => self.div = 0x0,

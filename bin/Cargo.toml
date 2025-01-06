@@ -1,0 +1,16 @@
+[package]
+name = "bin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = {version = "4.3.8", features = ["cargo"]}
+egui = "0.22.0"
+egui-wgpu = "0.22.0"
+egui-winit = "0.22.0"
+pixels = "0.14.0"
+tracing = "0.1.37"
+tracing-subscriber = "0.3.17"
+winit = "0.28.6"
+libgb = { path = "../libgb" }
+anyhow = "1.0.95"

@@ -1,7 +1,11 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::mmu::{
-    interrupts::{InterruptFlag, InterruptVector}, map::{OAM_BEGIN, OAM_END, VRAM_BEGIN, VRAM_END, VRAM_LEN}, Memory, UNDEFINED
+use crate::{
+    bus::{
+        interrupts::{InterruptFlag, Interrupts},
+        OAM_BEGIN, OAM_END, UNDEFINED, VRAM_BEGIN, VRAM_END, VRAM_LEN,
+    },
+    utils::addressable::Addressable,
 };
 
 use self::{
@@ -28,107 +32,86 @@ const CYCLES_VBLANK: u32 = 456;
 const SCANLINES_DISPLAY: u8 = 143;
 const MAX_SCANLINES: u8 = 153;
 
-const PALETTE: [[Color; 4]; 4] = [
-    [Color::White, Color::White, Color::White, Color::White],
-    [
-        Color::LightGray,
-        Color::LightGray,
-        Color::LightGray,
-        Color::White,
-    ],
-    [
-        Color::DarkGray,
-        Color::DarkGray,
-        Color::DarkGray,
-        Color::White,
-    ],
-    [Color::Black, Color::Black, Color::Black, Color::White],
+const PALETTE: [[u8; 4]; 4] = [
+    [255, 255, 255, 255],
+    [192, 192, 192, 255],
+    [96, 96, 96, 255],
+    [0, 0, 0, 255],
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Color {
+pub enum Color {
     White,
     LightGray,
     DarkGray,
     Black,
 }
 
-impl From<u8> for Color {
-    fn from(value: u8) -> Self {
-        match value {
-            0 => Color::White,
-            1 => Color::LightGray,
-            2 => Color::DarkGray,
-            _ => Color::Black,
+impl Color {
+    pub fn rgba(&self) -> [u8; 4] {
+        match self {
+            Color::White => PALETTE[0],
+            Color::LightGray => PALETTE[1],
+            Color::DarkGray => PALETTE[2],
+            Color::Black => PALETTE[3],
         }
     }
 }
 
-impl From<Color> for u8 {
-    fn from(color: Color) -> Self {
-        match color {
-            Color::White => 255,
-            Color::LightGray => 192,
-            Color::DarkGray => 96,
-            Color::Black => 0,
-        }
-    }
-}
-
-pub type Screen = [u8; SCREEN_WIDTH * SCREEN_HEIGHT * 3];
+pub type Screen = [[Color; SCREEN_HEIGHT]; SCREEN_WIDTH];
 
 #[derive(Debug)]
 pub struct Gpu {
     // Digital image with RGB. Size = 144 * 160 * 3.
-    pub screen: Screen,
-    pub vram: [u8; 0x2000],
-    pub lcdc: Lcdc,
-    pub stat: Stat,
-    pub v_blank: bool,
-    pub h_blank: bool,
-    pub int: Rc<RefCell<InterruptVector>>,
+    frame_buffer: Screen,
+    vram: [u8; 0x2000],
+    lcdc: Lcdc,
+    stat: Stat,
+    v_blank: bool,
+    h_blank: bool,
+    int: Rc<RefCell<Interrupts>>,
     // Specifies the position in the 256x256 pixels BG map (32x32 tiles) which is to be displayed at the upper/left LCD
     // display position.
-    pub sx: u8,
-    pub sy: u8,
+    sx: u8,
+    sy: u8,
     // The LY indicates the vertical line to which the present data is transferred to the LCD Driver
-    pub ly: u8,
+    ly: u8,
     // The gameboy permanently compares the value of the LYC and LY registers. When both values are identical, the
     // coincident bit in the STAT register becomes set, and (if enabled) a STAT interrupt is requested.
-    pub lyc: u8,
+    lyc: u8,
     //  This register assigns gray shades to the color numbers of the BG and Window tiles.
     //  Bit 7-6 - Shade for Color Number 3
     //  Bit 5-4 - Shade for Color Number 2
     //  Bit 3-2 - Shade for Color Number 1
     //  Bit 1-0 - Shade for Color Number 0
-    pub bgp: u8,
+    bgp: u8,
     // This register assigns gray shades for sprite palette 0. It works exactly as BGP ($FF47), except that the lower
     // two bits aren't used because sprite data 00 is transparent.
-    pub op0: u8,
+    op0: u8,
     // This register assigns gray shades for sprite palette 1. It works exactly as BGP ($FF47), except that the lower
     // two bits aren't used because sprite data 00 is transparent.
-    pub op1: u8,
+    op1: u8,
     // Window x and y
     // Specifies the upper/left positions of the Window area
-    pub wx: u8,
-    pub wy: u8,
+    wx: u8,
+    wy: u8,
     // Gameboy video controller can display up to 40 sprites either in 8x8 or in 8x16 pixels. Because of a limitation
     // of hardware, only ten sprites can be displayed per scan line. Sprite patterns have the same format as BG tiles,
     // but they are taken from the Sprite Pattern Table located at $8000-8FFF and have unsigned numbering.
-    pub oam: [u8; 0xA0],
+    oam: [u8; 0xA0],
     clock: u32,
 }
 
 impl Gpu {
-    pub fn new(intf: Rc<RefCell<InterruptVector>>) -> Self {
+    pub fn new(intf: Rc<RefCell<Interrupts>>) -> Self {
         Self {
             vram: [0; VRAM_LEN],
-            screen: [0; SCREEN_WIDTH * SCREEN_HEIGHT * 3],
+            frame_buffer: [[Color::White; SCREEN_HEIGHT]; SCREEN_WIDTH],
             int: intf,
             v_blank: false,
             h_blank: false,
             lcdc: Lcdc::from(0x91),
-            stat: stat::Stat::new(),
+            stat: Stat::new(),
             sx: 0,
             sy: 0,
             ly: 0,
@@ -144,11 +127,14 @@ impl Gpu {
     }
 
     pub fn step(&mut self, cycles: u32) {
+        let mcycles = cycles / 4;
         if !self.lcdc.lcd_enable {
             return;
         }
 
         self.clock += cycles;
+
+        let one_line_cycles = CYCLES_OAM + CYCLES_VRAM + CYCLES_HBLANK; // (* 114 *)
 
         match self.stat.mode {
             Mode::OAM => {
@@ -159,9 +145,9 @@ impl Gpu {
             }
             Mode::VRAM => {
                 if self.clock >= CYCLES_VRAM {
+                    self.clock %= CYCLES_VRAM;
                     self.render_scanline();
                     self.set_mode(Mode::HBlank);
-                    self.clock %= CYCLES_VRAM;
                 }
             }
             Mode::HBlank => {
@@ -189,6 +175,10 @@ impl Gpu {
                 }
             }
         }
+    }
+
+    pub fn get_frame_buffer(&self) -> Screen {
+        self.frame_buffer
     }
 
     fn compare_lyc(&mut self) {
@@ -253,7 +243,7 @@ impl Gpu {
                 self.get_bgmap_address(y_bg, x_bg)
             };
 
-            let tile = self.read8(tile_address);
+            let tile = self.read_byte(tile_address);
 
             let tile_begin = if self.lcdc.bg_window_tile_data_select {
                 // Use first tileset, tile_number interpreted as unsigned
@@ -271,9 +261,9 @@ impl Gpu {
 
             let tile_data_address = tile_begin + y_tile_addr_offset;
 
-            let tile_data = self.read8(tile_data_address);
+            let tile_data = self.read_byte(tile_data_address);
             // The color data is placed one byte after the pixel data
-            let tile_color = self.read8(tile_data_address + 1);
+            let tile_color = self.read_byte(tile_data_address + 1);
 
             let pixel_index = if is_window {
                 self.wx.wrapping_sub(x) % 8
@@ -283,6 +273,8 @@ impl Gpu {
 
             // Draw bg pixel to screen
             let color_index = Self::get_color_index(tile_data, tile_color, pixel_index);
+
+
         }
     }
 
@@ -324,8 +316,8 @@ impl Gpu {
     }
 }
 
-impl Memory for Gpu {
-    fn read8(&self, addr: u16) -> u8 {
+impl Addressable for Gpu {
+    fn read_byte(&self, addr: u16) -> u8 {
         let address = addr as usize;
         match address {
             VRAM_BEGIN..=VRAM_END => self.vram[address - VRAM_BEGIN],
@@ -346,7 +338,7 @@ impl Memory for Gpu {
         }
     }
 
-    fn write8(&mut self, addr: u16, value: u8) {
+    fn write_byte(&mut self, addr: u16, value: u8) {
         let address = addr as usize;
         match address {
             VRAM_BEGIN..=VRAM_END => self.vram[address - VRAM_BEGIN] = value,
