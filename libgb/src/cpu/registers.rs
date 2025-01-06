@@ -1,4 +1,3 @@
-
 #[derive(Debug, Clone, Copy)]
 pub struct Flags {
     pub zero: bool,
@@ -9,7 +8,12 @@ pub struct Flags {
 
 impl Flags {
     pub fn zero() -> Self {
-        Flags { zero: false, subtract: false, half_carry: false, carry: false }
+        Flags {
+            zero: false,
+            subtract: false,
+            half_carry: false,
+            carry: false,
+        }
     }
 
     /// Reset all the flags
@@ -103,7 +107,7 @@ impl Registers {
             e: 0,
             h: 0,
             l: 0,
-            f: Flags::zero()
+            f: Flags::zero(),
         }
     }
 

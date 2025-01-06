@@ -1,9 +1,9 @@
 mod apu;
+mod bus;
 mod clock;
 mod cpu;
 mod gpu;
 mod joypad;
-mod bus;
 mod timer;
 mod utils;
 
@@ -15,7 +15,7 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     fn load_rom(path: PathBuf) -> Vec<u8> {
-        return fs::read(path).expect("rom path should exist")
+        return fs::read(path).expect("rom path should exist");
     }
 
     #[cfg(test)]
@@ -40,7 +40,7 @@ mod tests {
             let gameboy = gameboy::Gameboy::new(false);
             let mut gb = gameboy;
             gb.load_rom(rom);
-            
+
             // Run for enough cycles to complete the test
             let mut total_frames = 0;
             while total_frames < MAX_FRAMES {

@@ -170,7 +170,10 @@ impl Addressable for Bus {
             // Interrupts
             INTERRUPT_FLAGS => self.intf.borrow_mut().data = value,
             INTERRUPT_ENABLE => self.inte = value,
-            _ => panic!("[w] attempt to write to invalid memory location {:02x}", addr),
+            _ => panic!(
+                "[w] attempt to write to invalid memory location {:02x}",
+                addr
+            ),
         }
     }
 }

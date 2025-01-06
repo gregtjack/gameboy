@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use anyhow::Result;
 use clap::{arg, value_parser, Command};
 use pixels::{Pixels, SurfaceTexture};
-use anyhow::Result;
+use std::path::PathBuf;
 use winit::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -9,7 +9,7 @@ use winit::{
     window::WindowBuilder,
 };
 
-use libgb::gameboy::{Gameboy, SCREEN_WIDTH, SCREEN_HEIGHT};
+use libgb::gameboy::{Gameboy, SCREEN_HEIGHT, SCREEN_WIDTH};
 
 mod utils;
 
@@ -26,7 +26,8 @@ fn main() {
             .get_one::<PathBuf>("rom")
             .expect("Invalid game rom path")
             .to_path_buf(),
-    ).unwrap();
+    )
+    .unwrap();
 
     gameboy.load_rom(rom);
 
@@ -36,7 +37,10 @@ fn main() {
     let window = {
         WindowBuilder::new()
             .with_title("Gameboy")
-            .with_inner_size(LogicalSize::new(SCREEN_WIDTH as f64 * 2.0, SCREEN_HEIGHT as f64 * 2.0))
+            .with_inner_size(LogicalSize::new(
+                SCREEN_WIDTH as f64 * 2.0,
+                SCREEN_HEIGHT as f64 * 2.0,
+            ))
             .build(&event_loop)
             .expect("Window should have been initialized successfully")
     };

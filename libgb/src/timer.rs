@@ -1,6 +1,9 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::{bus::interrupts::{InterruptFlag, Interrupts}, utils::addressable::Addressable};
+use crate::{
+    bus::interrupts::{InterruptFlag, Interrupts},
+    utils::addressable::Addressable,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TimerControl {
@@ -10,7 +13,10 @@ pub struct TimerControl {
 
 impl TimerControl {
     pub fn new() -> Self {
-        Self { speed: Speed::T4, running: false }
+        Self {
+            speed: Speed::T4,
+            running: false,
+        }
     }
 }
 
@@ -33,7 +39,7 @@ impl From<u8> for TimerControl {
             0x1 => Speed::T256,
             0x2 => Speed::T64,
             0x3 => Speed::T16,
-            _ => panic!("[tac] invalid speed")
+            _ => panic!("[tac] invalid speed"),
         };
         let running = (value & 0x4) != 0;
         Self { speed, running }
@@ -41,7 +47,7 @@ impl From<u8> for TimerControl {
 }
 
 /// Possible divider values usable as timer clock source.
-#[derive(Clone,Copy,Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Speed {
     /// Divide sysclk by 1024. Timer clock is 4.096kHz
     T4,
@@ -83,13 +89,17 @@ impl Timer {
             tma: 0,
             tac: TimerControl::new(),
             int: intf,
-            _clock: TimerClock { main: 0, sub: 0, div: 0 }
+            _clock: TimerClock {
+                main: 0,
+                sub: 0,
+                div: 0,
+            },
         }
     }
 
     pub fn step(&mut self, cycles: u32) {
         self._clock.sub += cycles / 4;
-        
+
         if self._clock.sub >= 4 {
             self._clock.main += 1;
             self._clock.sub -= 4;
@@ -133,7 +143,7 @@ impl Addressable for Timer {
             0xFF05 => self.tima,
             0xFF06 => self.tma,
             0xFF07 => self.tac.into(),
-            _ => panic!("[timer] read: Invalid timer address {:02x}", addr)
+            _ => panic!("[timer] read: Invalid timer address {:02x}", addr),
         }
     }
 
@@ -144,7 +154,7 @@ impl Addressable for Timer {
             0xFF05 => self.tima = value,
             0xFF06 => self.tma = value,
             0xFF07 => self.tac = value.into(),
-            _ => panic!("[timer] write: Invalid timer address {:02x}", addr)
+            _ => panic!("[timer] write: Invalid timer address {:02x}", addr),
         }
     }
 }

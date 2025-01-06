@@ -1,4 +1,3 @@
-
 pub enum InterruptFlag {
     VBlank,
     LCDStat,

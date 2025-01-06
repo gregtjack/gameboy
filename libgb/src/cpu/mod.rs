@@ -1,6 +1,6 @@
 use self::registers::{Flags, Registers};
-use anyhow::Result;
 use crate::{bus::Bus, utils::addressable::Addressable};
+use anyhow::Result;
 
 mod registers;
 
@@ -145,7 +145,9 @@ impl Cpu {
         // Returns the new program counter and t_cycles used
         let opcode = self.bus.read_byte(self.reg.pc);
         let mut cycles = if !self.halted {
-            if self.debug { self.print_debug() }
+            if self.debug {
+                self.print_debug()
+            }
             match self.execute(opcode) {
                 Ok((pc, cycles)) => {
                     self.reg.pc = pc;
@@ -651,7 +653,8 @@ impl Cpu {
             }
             0xE2 => {
                 // LD (C), A
-                self.bus.write_byte(0xFF00 | (self.reg.c as u16), self.reg.a);
+                self.bus
+                    .write_byte(0xFF00 | (self.reg.c as u16), self.reg.a);
                 Ok((self.reg.pc.wrapping_add(1), 8))
             }
             0xF2 => {

@@ -273,8 +273,6 @@ impl Gpu {
 
             // Draw bg pixel to screen
             let color_index = Self::get_color_index(tile_data, tile_color, pixel_index);
-
-
         }
     }
 
