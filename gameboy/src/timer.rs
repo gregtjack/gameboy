@@ -1,8 +1,8 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    bus::interrupts::{InterruptFlag, Interrupts},
-    utils::addressable::Addressable,
+    addressable::Addressable,
+    mmu::interrupts::{InterruptFlag, Interrupts},
 };
 
 #[derive(Debug, Clone, Copy)]

@@ -1,6 +1,5 @@
 use self::registers::{Flags, Registers};
-use crate::{bus::Bus, utils::addressable::Addressable};
-use anyhow::Result;
+use crate::{addressable::Addressable, mmu::Mmu};
 
 mod registers;
 
@@ -106,11 +105,26 @@ macro_rules! dec {
     };
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuErr {
+    InvalidInstruction(u8),
+}
+
+impl std::fmt::Display for CpuErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CpuErr::InvalidInstruction(instruction) => {
+                write!(f, "invalid CPU instruction: {:02x}", instruction)
+            }
+        }
+    }
+}
+
 /// Implementation of the Sharp LR35902
 #[derive(Debug)]
 pub struct Cpu {
     reg: Registers,
-    pub bus: Bus,
+    pub bus: Mmu,
     pub halted: bool,
     ime: bool,
     ime_next: bool,
@@ -121,18 +135,18 @@ impl Cpu {
     pub fn new(debug: bool) -> Self {
         Self {
             reg: Registers {
-                pc: 0x100,
-                sp: 0xFFFE,
-                a: 0x01,
-                b: 0x00,
-                c: 0x13,
-                d: 0x00,
-                e: 0xD8,
-                h: 0x01,
-                l: 0x4D,
-                f: Flags::from(0xB0),
+                pc: 0,
+                sp: 0,
+                a: 0,
+                b: 0,
+                c: 0,
+                d: 0,
+                e: 0,
+                h: 0,
+                l: 0,
+                f: Flags::zero(),
             },
-            bus: Bus::new(),
+            bus: Mmu::new(),
             halted: false,
             ime: true,
             ime_next: false,
@@ -153,7 +167,7 @@ impl Cpu {
                     self.reg.pc = pc;
                     cycles
                 }
-                Err(_) => panic!("[cpu] invalid instruction: {:02x}", opcode),
+                Err(err) => panic!("{}", err),
             }
         } else {
             4
@@ -210,7 +224,7 @@ impl Cpu {
         None
     }
 
-    fn execute(&mut self, instruction: u8) -> Result<(u16, u32)> {
+    fn execute(&mut self, instruction: u8) -> Result<(u16, u32), CpuErr> {
         match instruction {
             /* CPU control */
             0x00 => Ok((self.reg.pc.wrapping_add(1), 4)), // NOP
@@ -1597,11 +1611,11 @@ impl Cpu {
             /* CB prefixed opcodes */
             0xCB => self.execute_prefixed(self.bus.read_byte(self.reg.pc.wrapping_add(1))),
 
-            _ => panic!("Invalid opcode: 0x{:02X}", instruction),
+            _ => Err(CpuErr::InvalidInstruction(instruction)),
         }
     }
 
-    fn execute_prefixed(&mut self, instruction: u8) -> Result<(u16, u32)> {
+    fn execute_prefixed(&mut self, instruction: u8) -> Result<(u16, u32), CpuErr> {
         match instruction {
             0x00 => {
                 // RLC B
@@ -3110,6 +3124,7 @@ impl Cpu {
         }
     }
 
+    #[inline]
     fn add(&mut self, value: u8) {
         let (new_value, overflow) = self.reg.a.overflowing_add(value);
         self.reg.f.set_z(new_value == 0x0);
@@ -3119,6 +3134,7 @@ impl Cpu {
         self.reg.a = new_value;
     }
 
+    #[inline]
     fn add16(&mut self, value: u16) {
         let hl = self.reg.hl();
         let res = hl.wrapping_add(value);
@@ -3128,17 +3144,20 @@ impl Cpu {
         self.reg.set_hl(res);
     }
 
+    #[inline]
     fn push(&mut self, value: u16) {
         self.reg.sp = self.reg.sp.wrapping_sub(2);
         self.bus.write_word(self.reg.sp, value);
     }
 
+    #[inline]
     fn pop(&mut self) -> u16 {
         let value = self.bus.read_word(self.reg.sp);
         self.reg.sp = self.reg.sp.wrapping_add(2);
         value
     }
 
+    #[inline]
     fn rlc(&mut self, value: u8) -> u8 {
         let carry = (value >> 7) != 0;
         let new_value = (value << 1) | (value >> 7);
@@ -3149,6 +3168,7 @@ impl Cpu {
         new_value
     }
 
+    #[inline]
     fn rl(&mut self, value: u8) -> u8 {
         let carry = (value >> 7) != 0;
         let new_value = (value << 1) | (self.reg.f.carry as u8);
@@ -3159,6 +3179,7 @@ impl Cpu {
         new_value
     }
 
+    #[inline]
     fn rrc(&mut self, value: u8) -> u8 {
         let carry = (value & 1) != 0;
         let new_value = (value >> 1) | (value << 7);
@@ -3169,6 +3190,7 @@ impl Cpu {
         new_value
     }
 
+    #[inline]
     fn rr(&mut self, value: u8) -> u8 {
         let carry = (value & 1) != 0;
         let new_value = (value >> 1) | ((self.reg.f.carry as u8) << 7);
@@ -3179,6 +3201,7 @@ impl Cpu {
         new_value
     }
 
+    #[inline]
     fn sla(&mut self, value: u8) -> u8 {
         let carry = (value >> 7) != 0;
         let new_value = value << 1;
@@ -3189,6 +3212,7 @@ impl Cpu {
         new_value
     }
 
+    #[inline]
     fn sra(&mut self, value: u8) -> u8 {
         let carry = (value & 1) != 0;
         let new_value = (value & 0x80) | (value >> 1);
@@ -3199,6 +3223,7 @@ impl Cpu {
         new_value
     }
 
+    #[inline]
     fn swap(&mut self, value: u8) -> u8 {
         let new_value = (value << 4) | (value >> 4);
         self.reg.f.set_z(new_value == 0x0);
@@ -3208,6 +3233,7 @@ impl Cpu {
         new_value
     }
 
+    #[inline]
     fn srl(&mut self, value: u8) -> u8 {
         let carry = (value & 1) != 0;
         let new_value = value >> 1;
@@ -3218,16 +3244,19 @@ impl Cpu {
         new_value
     }
 
+    #[inline]
     fn bit(&mut self, bit: u8, value: u8) {
         self.reg.f.set_z((value & (1 << bit)) == 0x0);
         self.reg.f.set_n(false);
         self.reg.f.set_h(true);
     }
 
+    #[inline]
     fn res(&mut self, bit: u8, value: u8) -> u8 {
         value & !(1 << bit)
     }
 
+    #[inline]
     fn set(&mut self, bit: u8, value: u8) -> u8 {
         value | (1 << bit)
     }

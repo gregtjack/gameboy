@@ -1,0 +1,16 @@
+[package]
+name = "gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { version = "4.3.8", features = ["cargo"] }
+egui = "0.31.0"
+egui-wgpu = "0.31.0"
+egui-winit = "0.31.0"
+env_logger = "0.11.6"
+gameboy = { path = "../gameboy" }
+log = "0.4.25"
+pixels = "0.15.0"
+winit = "0.30.9"

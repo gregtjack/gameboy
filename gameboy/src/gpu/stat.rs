@@ -29,7 +29,6 @@ impl Stat {
 }
 
 impl From<Stat> for u8 {
-    #[inline]
     fn from(value: Stat) -> Self {
         let mut byte = 0;
         let mode: u8 = value.mode.into();
@@ -44,21 +43,14 @@ impl From<Stat> for u8 {
 }
 
 impl From<u8> for Stat {
-    #[inline]
     fn from(byte: u8) -> Self {
-        let mode = Mode::from(byte & 0b11);
-        let coincidence_flag = ((byte >> 2) & 1) != 0;
-        let hblank_interrupt = ((byte >> 3) & 1) != 0;
-        let vblank_interrupt = ((byte >> 4) & 1) != 0;
-        let oam_interrupt = ((byte >> 5) & 1) != 0;
-        let coincidence_interrupt = ((byte >> 6) & 1) != 0;
         Self {
-            mode,
-            coincidence_flag,
-            hblank_interrupt,
-            vblank_interrupt,
-            oam_interrupt,
-            coincidence_interrupt,
+            mode: Mode::from(byte & 0b11),
+            coincidence_flag: ((byte >> 2) & 1) != 0,
+            hblank_interrupt: ((byte >> 3) & 1) != 0,
+            vblank_interrupt: ((byte >> 4) & 1) != 0,
+            oam_interrupt: ((byte >> 5) & 1) != 0,
+            coincidence_interrupt: ((byte >> 6) & 1) != 0,
         }
     }
 }
