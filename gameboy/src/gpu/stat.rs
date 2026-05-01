@@ -26,6 +26,13 @@ impl Stat {
             coincidence_interrupt: false,
         }
     }
+
+    pub fn write_control(&mut self, byte: u8) {
+        self.hblank_interrupt = ((byte >> 3) & 1) != 0;
+        self.vblank_interrupt = ((byte >> 4) & 1) != 0;
+        self.oam_interrupt = ((byte >> 5) & 1) != 0;
+        self.coincidence_interrupt = ((byte >> 6) & 1) != 0;
+    }
 }
 
 impl From<Stat> for u8 {
@@ -39,6 +46,32 @@ impl From<Stat> for u8 {
         byte |= (value.oam_interrupt as u8) << 5;
         byte |= (value.coincidence_interrupt as u8) << 6;
         byte
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stat_write_preserves_read_only_mode_and_coincidence_bits() {
+        let mut stat = Stat {
+            mode: Mode::VRAM,
+            coincidence_flag: true,
+            hblank_interrupt: false,
+            vblank_interrupt: false,
+            oam_interrupt: false,
+            coincidence_interrupt: false,
+        };
+
+        stat.write_control(0b0111_1000);
+
+        assert!(matches!(stat.mode, Mode::VRAM));
+        assert!(stat.coincidence_flag);
+        assert!(stat.hblank_interrupt);
+        assert!(stat.vblank_interrupt);
+        assert!(stat.oam_interrupt);
+        assert!(stat.coincidence_interrupt);
     }
 }
 

@@ -1,9 +1,8 @@
-use std::{cell::RefCell, rc::Rc};
-
 use crate::{
     addressable::Addressable,
     mmu::interrupts::{InterruptFlag, Interrupts},
 };
+use std::{cell::RefCell, rc::Rc};
 
 #[derive(Debug, Clone, Copy)]
 pub enum Key {
@@ -73,8 +72,6 @@ impl Joypad {
             Key::Select => &mut self.select,
         };
 
-        println!("pressed key: {:?}", key);
-
         *key_state = KeyState::Pressed;
     }
 
@@ -124,13 +121,42 @@ impl Addressable for Joypad {
         match addr {
             0xFF00 => {
                 self.mode = match byte & 0b0011_0000 {
-                    0b0001_0000 => Mode::Direction,
-                    0b0010_0000 => Mode::Action,
-                    0b0011_0000 => Mode::None,
+                    0b0001_0000 => Mode::Action,
+                    0b0010_0000 => Mode::Direction,
+                    0b0011_0000 | 0b0 => Mode::None,
                     _ => panic!("Invalid joypad mode"),
                 };
             }
             _ => panic!("Invalid joypad address"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn joypad() -> Joypad {
+        Joypad::new(Rc::new(RefCell::new(Interrupts::new())))
+    }
+
+    #[test]
+    fn action_row_is_selected_by_clearing_bit_5() {
+        let mut joypad = joypad();
+        joypad.press(Key::Start);
+
+        joypad.write_byte(0xFF00, 0b0001_0000);
+
+        assert_eq!(joypad.read_byte(0xFF00), 0b1101_0111);
+    }
+
+    #[test]
+    fn direction_row_is_selected_by_clearing_bit_4() {
+        let mut joypad = joypad();
+        joypad.press(Key::Right);
+
+        joypad.write_byte(0xFF00, 0b0010_0000);
+
+        assert_eq!(joypad.read_byte(0xFF00), 0b1110_1110);
     }
 }

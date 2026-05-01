@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::addressable::Addressable;
+use crate::cartridge::Cartridge;
 use crate::joypad::Joypad;
 use crate::{gpu::Gpu, timer::Timer};
 
@@ -70,9 +71,8 @@ const BIOS: [u8; BIOS_LEN as usize] = [
 pub struct Mmu {
     pub in_bios: bool,
     pub bios: [u8; BIOS_LEN as usize],
-    pub rom: [u8; ROM_LEN as usize],
+    pub cartridge: Cartridge,
     pub wram: [u8; WRAM_LEN as usize + ECHO_LEN as usize],
-    pub eram: [u8; ERAM_LEN as usize],
     pub zram: [u8; ZRAM_LEN as usize],
     /// Serial data
     pub sb: u8,
@@ -98,9 +98,8 @@ impl Mmu {
             inte: 0,
             bios: BIOS,
             in_bios: true,
-            rom: [0; ROM_LEN as usize],
+            cartridge: Cartridge::default(),
             wram: [0; (WRAM_LEN + ECHO_LEN) as usize],
-            eram: [0; ERAM_LEN as usize],
             zram: [0; ZRAM_LEN as usize],
             sb: 0,
             sc: 0,
@@ -111,6 +110,11 @@ impl Mmu {
     pub fn step(&mut self, cycles: u32) {
         self.gpu.step(cycles);
         self.timer.step(cycles);
+    }
+
+    pub fn load_rom(&mut self, rom: Vec<u8>) {
+        self.cartridge = Cartridge::from_rom(rom);
+        self.in_bios = true;
     }
 
     /// Perform DMA transfer from source memory to OAM
@@ -131,11 +135,11 @@ impl Addressable for Mmu {
                 if self.in_bios && addr < 0x0100 {
                     self.bios[addr as usize]
                 } else {
-                    self.rom[addr as usize]
+                    self.cartridge.read_byte(addr)
                 }
             }
             VRAM_BEGIN..=VRAM_END => self.gpu.read_byte(addr as u16),
-            ERAM_BEGIN..=ERAM_END => self.eram[(addr - ERAM_BEGIN) as usize],
+            ERAM_BEGIN..=ERAM_END => self.cartridge.read_byte(addr),
             WRAM_BEGIN..=WRAM_END => self.wram[(addr - WRAM_BEGIN) as usize],
             ECHO_BEGIN..=ECHO_END => self.wram[(addr - ECHO_BEGIN) as usize],
             OAM_BEGIN..=OAM_END => self.gpu.read_byte(addr as u16),
@@ -157,15 +161,9 @@ impl Addressable for Mmu {
 
     fn write_byte(&mut self, addr: u16, value: u8) {
         match addr {
-            ROM_BEGIN..=ROM_END => {
-                if self.in_bios && addr < 0x0100 {
-                    self.bios[addr as usize] = value;
-                } else {
-                    self.rom[addr as usize] = value;
-                }
-            }
+            ROM_BEGIN..=ROM_END => self.cartridge.write_byte(addr, value),
             VRAM_BEGIN..=VRAM_END => self.gpu.write_byte(addr as u16, value),
-            ERAM_BEGIN..=ERAM_END => self.eram[(addr - ERAM_BEGIN) as usize] = value,
+            ERAM_BEGIN..=ERAM_END => self.cartridge.write_byte(addr, value),
             WRAM_BEGIN..=WRAM_END => self.wram[(addr - WRAM_BEGIN) as usize] = value,
             ECHO_BEGIN..=ECHO_END => self.wram[(addr - ECHO_BEGIN) as usize] = value,
             OAM_BEGIN..=OAM_END => self.gpu.write_byte(addr as u16, value),
@@ -192,5 +190,24 @@ impl Addressable for Mmu {
             INTERRUPT_ENABLE => self.inte = value,
             _ => (),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cartridge_rom_writes_are_ignored() {
+        let mut mmu = Mmu::new();
+        mmu.in_bios = false;
+        let mut rom = vec![0; ROM_LEN as usize];
+        rom[0x2000] = 0x42;
+        mmu.load_rom(rom);
+        mmu.in_bios = false;
+
+        mmu.write_byte(0x2000, 0x99);
+
+        assert_eq!(mmu.read_byte(0x2000), 0x42);
     }
 }

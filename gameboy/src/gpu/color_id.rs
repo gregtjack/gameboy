@@ -1,7 +1,7 @@
 #[derive(Debug, Clone, Copy)]
 pub enum ColorBit {
     Hi,
-    Lo
+    Lo,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -25,8 +25,8 @@ impl ColorId {
     pub fn get_bit(&self, bit: ColorBit) -> bool {
         match self {
             ColorId::Id01 => match bit {
-                    ColorBit::Hi => false,
-                    ColorBit::Lo => true,
+                ColorBit::Hi => false,
+                ColorBit::Lo => true,
             },
             ColorId::Id10 => match bit {
                 ColorBit::Hi => true,
@@ -48,4 +48,3 @@ impl ColorId {
         }
     }
 }
-

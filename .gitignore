@@ -1,5 +1,6 @@
 /target
 /roms
-*.rom
 *.bin
 *.log
+
+.DS_Store

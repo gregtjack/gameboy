@@ -220,7 +220,11 @@ impl Cpu {
             }
         }
 
-        self.ime = self.ime_next;
+        if self.ime_next {
+            self.ime = true;
+            self.ime_next = false;
+        }
+
         None
     }
 
@@ -688,7 +692,6 @@ impl Cpu {
                 self.reg.a = self.bus.read_byte(nn);
                 Ok((self.reg.pc.wrapping_add(3), 16))
             }
-
             /* 16-bit load */
             0x01 => {
                 // LD BC, nn
@@ -1577,6 +1580,7 @@ impl Cpu {
             0xF3 => {
                 // DI
                 self.ime = false;
+                self.ime_next = false;
                 Ok((self.reg.pc.wrapping_add(1), 4))
             }
             0xFB => {
@@ -3259,5 +3263,54 @@ impl Cpu {
     #[inline]
     fn set(&mut self, bit: u8, value: u8) -> u8 {
         value | (1 << bit)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reti_leaves_ime_enabled() {
+        let mut cpu = Cpu::new(false);
+        cpu.ime = false;
+        cpu.reg.sp = 0xC000;
+        cpu.bus.write_word(cpu.reg.sp, 0x1234);
+
+        let (pc, _) = cpu.execute(0xD9).unwrap();
+        cpu.reg.pc = pc;
+        cpu.handle_interrupts();
+
+        assert!(cpu.ime);
+        assert!(!cpu.ime_next);
+    }
+
+    #[test]
+    fn ei_enables_ime_once_after_current_instruction() {
+        let mut cpu = Cpu::new(false);
+        cpu.ime = false;
+
+        cpu.execute(0xFB).unwrap();
+        assert!(!cpu.ime);
+        assert!(cpu.ime_next);
+
+        cpu.handle_interrupts();
+        assert!(cpu.ime);
+        assert!(!cpu.ime_next);
+
+        cpu.handle_interrupts();
+        assert!(cpu.ime);
+    }
+
+    #[test]
+    fn di_cancels_pending_ei() {
+        let mut cpu = Cpu::new(false);
+
+        cpu.execute(0xFB).unwrap();
+        cpu.execute(0xF3).unwrap();
+        cpu.handle_interrupts();
+
+        assert!(!cpu.ime);
+        assert!(!cpu.ime_next);
     }
 }

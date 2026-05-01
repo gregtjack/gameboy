@@ -100,7 +100,7 @@ impl Timer {
     pub fn step(&mut self, cycles: u32) {
         self._clock.sub += cycles / 4;
 
-        if self._clock.sub >= 4 {
+        while self._clock.sub >= 4 {
             self._clock.main += 1;
             self._clock.sub -= 4;
 
@@ -109,9 +109,9 @@ impl Timer {
                 self.div = self.div.wrapping_add(1);
                 self._clock.div = 0;
             }
-        }
 
-        self.check();
+            self.check();
+        }
     }
 
     fn check(&mut self) {
@@ -126,12 +126,49 @@ impl Timer {
             if self._clock.main >= threshold {
                 self._clock.main = 0;
                 self.tima = self.tima.wrapping_add(1);
-                if self.tima == 0x0 {
+                if self.tima == 0 {
                     self.tima = self.tma;
                     self.int.borrow_mut().set_flag(InterruptFlag::Timer)
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn timer() -> Timer {
+        Timer::new(Rc::new(RefCell::new(Interrupts::new())))
+    }
+
+    #[test]
+    fn divider_ticks_every_256_t_cycles() {
+        let mut timer = timer();
+
+        for _ in 0..63 {
+            timer.step(4);
+        }
+        assert_eq!(timer.div, 0);
+
+        timer.step(4);
+        assert_eq!(timer.div, 1);
+    }
+
+    #[test]
+    fn tima_uses_selected_clock_rate() {
+        let mut timer = timer();
+        timer.tac = TimerControl {
+            speed: Speed::T256,
+            running: true,
+        };
+
+        timer.step(12);
+        assert_eq!(timer.tima, 0);
+
+        timer.step(4);
+        assert_eq!(timer.tima, 1);
     }
 }
 

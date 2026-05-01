@@ -177,8 +177,8 @@ impl Gpu {
         }
     }
 
-    pub fn get_frame_buffer(&self) -> Screen {
-        self.frame_buffer
+    pub fn get_frame_buffer(&self) -> &Screen {
+        &self.frame_buffer
     }
 
     pub fn set_theme(&mut self, theme: Theme) {
@@ -543,7 +543,7 @@ impl Addressable for Gpu {
                     self.stat.mode = Mode::OAM;
                 }
             }
-            0xFF41 => self.stat = value.into(),
+            0xFF41 => self.stat.write_control(value),
             0xFF42 => self.sy = value,
             0xFF43 => self.sx = value,
             0xFF44 => {} // LY is read-only

@@ -1,5 +1,6 @@
 mod addressable;
 mod apu;
+mod cartridge;
 mod clock;
 mod cpu;
 mod gpu;

@@ -1,8 +1,9 @@
 use clap::{arg, value_parser, Command};
-use log::{error, info};
+use log::{debug, error, info};
 use pixels::{Pixels, SurfaceTexture};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
@@ -15,10 +16,15 @@ use gameboy::joypad::Key;
 use gameboy::Theme;
 mod utils;
 
+const GAMEBOY_UPDATE_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 60);
+const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250);
+
 struct Emulator {
     window: Option<Arc<Window>>,
     pixels: Option<Pixels<'static>>,
     gameboy: Gameboy,
+    last_update: Instant,
+    accumulated_time: Duration,
 }
 
 impl ApplicationHandler for Emulator {
@@ -84,15 +90,23 @@ impl ApplicationHandler for Emulator {
                         match keycode {
                             KeyCode::Digit1 => {
                                 self.gameboy.set_theme(Theme::Grayscale);
-                                info!("Theme switched to Grayscale");
+                                debug!("Theme switched to Grayscale");
                             }
                             KeyCode::Digit2 => {
                                 self.gameboy.set_theme(Theme::Green);
-                                info!("Theme switched to Green");
+                                debug!("Theme switched to Green");
                             }
                             KeyCode::Digit3 => {
                                 self.gameboy.set_theme(Theme::PurpleYellow);
-                                info!("Theme switched to Purple/Yellow");
+                                debug!("Theme switched to Purple/Yellow");
+                            }
+                            KeyCode::KeyP => {
+                                self.gameboy.pause();
+                                debug!("Emulation paused");
+                            }
+                            KeyCode::KeyR => {
+                                self.gameboy.resume();
+                                debug!("Emulation resumed")
                             }
                             _ => {}
                         }
@@ -108,10 +122,10 @@ impl ApplicationHandler for Emulator {
                 }
             }
             WindowEvent::RedrawRequested => {
-                self.gameboy.update();
+                self.advance_emulation();
 
                 let frame = self.pixels.as_mut().unwrap().frame_mut();
-                let screen = self.gameboy.frame();
+                let screen = self.gameboy.screen();
                 for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
                     let x = (i % SCREEN_WIDTH as usize) as i16;
                     let y = (i / SCREEN_WIDTH as usize) as i16;
@@ -138,6 +152,20 @@ impl Emulator {
             window: None,
             pixels: None,
             gameboy,
+            last_update: Instant::now(),
+            accumulated_time: Duration::ZERO,
+        }
+    }
+
+    fn advance_emulation(&mut self) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_update);
+        self.last_update = now;
+        self.accumulated_time += elapsed.min(MAX_ACCUMULATED_TIME);
+
+        while self.accumulated_time >= GAMEBOY_UPDATE_INTERVAL {
+            self.gameboy.update();
+            self.accumulated_time -= GAMEBOY_UPDATE_INTERVAL;
         }
     }
 }
